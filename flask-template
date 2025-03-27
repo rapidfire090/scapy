@@ -2,12 +2,12 @@
 <html lang="en">
 <head>
   <meta charset="UTF-8">
-  <title>Reserve a Time</title>
+  <title>Reserve a Time Slot</title>
   <link rel="stylesheet" href="{{ url_for('static', filename='style.css') }}">
 </head>
 <body>
   <div class="container">
-    <h1>Reserve a Date & Time</h1>
+    <h1>Reserve a Time Slot</h1>
 
     {% with messages = get_flashed_messages(with_categories=true) %}
       {% if messages %}
@@ -20,19 +20,42 @@
     {% endwith %}
 
     <form method="POST">
-      <label for="account_name">Your Name:</label>
-      <input type="text" name="account_name" id="account_name" required>
+      <label for="account_name">Select Your Account:</label>
+      <select name="account_name" required>
+        <option value="" disabled selected>Select your name</option>
+        {% for user in users %}
+          <option value="{{ user }}">{{ user }}</option>
+        {% endfor %}
+      </select>
 
-      <label for="datetime_slot">Choose Date and Time:</label>
-      <input type="datetime-local" name="datetime_slot" id="datetime_slot" required>
+      <label for="requester_name">Requester Name:</label>
+      <input type="text" name="requester_name" required>
+
+      <label for="start_time">Start Time:</label>
+      <input type="datetime-local" name="start_time" required>
+
+      <label for="end_time">End Time:</label>
+      <input type="datetime-local" name="end_time" required>
 
       <button type="submit">Reserve</button>
     </form>
 
-    <h2>Existing Reservations</h2>
+    <h2>Current Reservations</h2>
     <ul class="reservation-list">
       {% for res in reservations %}
-        <li><strong>{{ res.datetime_slot.strftime('%b %d, %Y %I:%M %p') }}</strong>: {{ res.account_name }}</li>
+        <li>
+          <strong>{{ res.account_name }}</strong> (requested by {{ res.requester_name }}): 
+          {{ res.start_time.strftime('%b %d, %Y %I:%M %p') }} – 
+          {{ res.end_time.strftime('%I:%M %p') }}
+
+          <form action="{{ url_for('delete', res_id=res.id) }}" method="POST" style="display:inline;">
+            <button type="submit">Cancel</button>
+          </form>
+
+          <a href="{{ url_for('edit', res_id=res.id) }}">
+            <button type="button">Edit</button>
+          </a>
+        </li>
       {% endfor %}
     </ul>
   </div>
