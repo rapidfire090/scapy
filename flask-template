@@ -1,0 +1,40 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <title>Reserve a Time</title>
+  <link rel="stylesheet" href="{{ url_for('static', filename='style.css') }}">
+</head>
+<body>
+  <div class="container">
+    <h1>Reserve a Date & Time</h1>
+
+    {% with messages = get_flashed_messages(with_categories=true) %}
+      {% if messages %}
+        <ul class="messages">
+          {% for category, message in messages %}
+            <li class="{{ category }}">{{ message }}</li>
+          {% endfor %}
+        </ul>
+      {% endif %}
+    {% endwith %}
+
+    <form method="POST">
+      <label for="account_name">Your Name:</label>
+      <input type="text" name="account_name" id="account_name" required>
+
+      <label for="datetime_slot">Choose Date and Time:</label>
+      <input type="datetime-local" name="datetime_slot" id="datetime_slot" required>
+
+      <button type="submit">Reserve</button>
+    </form>
+
+    <h2>Existing Reservations</h2>
+    <ul class="reservation-list">
+      {% for res in reservations %}
+        <li><strong>{{ res.datetime_slot.strftime('%b %d, %Y %I:%M %p') }}</strong>: {{ res.account_name }}</li>
+      {% endfor %}
+    </ul>
+  </div>
+</body>
+</html>
