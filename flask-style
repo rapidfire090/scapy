@@ -13,11 +13,16 @@
   background: #f9f9f9;
   border: 1px solid #ddd;
   border-radius: 8px;
+  position: relative;
 }
 
 .action-buttons {
-  display: flex;
+  display: none;
   gap: 0.5rem;
+}
+
+.reservation-item:hover .action-buttons {
+  display: flex;
 }
 
 .action-buttons form,
