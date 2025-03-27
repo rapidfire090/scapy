@@ -1,0 +1,44 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <title>Edit Reservation</title>
+  <link rel="stylesheet" href="{{ url_for('static', filename='style.css') }}">
+</head>
+<body>
+  <div class="container">
+    <h1>Edit Reservation</h1>
+
+    {% with messages = get_flashed_messages(with_categories=true) %}
+      {% if messages %}
+        <ul class="messages">
+          {% for category, message in messages %}
+            <li class="{{ category }}">{{ message }}</li>
+          {% endfor %}
+        </ul>
+      {% endif %}
+    {% endwith %}
+
+    <form method="POST">
+      <label for="account_name">Select Account:</label>
+      <select name="account_name" required>
+        {% for user in users %}
+          <option value="{{ user }}" {% if user == reservation.account_name %}selected{% endif %}>{{ user }}</option>
+        {% endfor %}
+      </select>
+
+      <label for="requester_name">Requester Name:</label>
+      <input type="text" name="requester_name" value="{{ reservation.requester_name }}" required>
+
+      <label for="start_time">Start Time:</label>
+      <input type="datetime-local" name="start_time" value="{{ reservation.start_time.strftime('%Y-%m-%dT%H:%M') }}" required>
+
+      <label for="end_time">End Time:</label>
+      <input type="datetime-local" name="end_time" value="{{ reservation.end_time.strftime('%Y-%m-%dT%H:%M') }}" required>
+
+      <button type="submit">Save Changes</button>
+      <a href="{{ url_for('index') }}"><button type="button">Cancel</button></a>
+    </form>
+  </div>
+</body>
+</html>
