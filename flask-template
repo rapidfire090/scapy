@@ -41,25 +41,35 @@
     </form>
 
     <h2>Current Reservations</h2>
-    <ul class="reservation-list">
-      {% for res in reservations %}
-        <li class="reservation-item">
-          <span>
-            <strong>{{ res.account_name }}</strong> (requested by {{ res.requester_name }}): 
-            {{ res.start_time.strftime('%b %d, %Y %I:%M %p') }} – 
-            {{ res.end_time.strftime('%I:%M %p') }}
-          </span>
-          <div class="action-buttons">
-            <form action="{{ url_for('delete', res_id=res.id) }}" method="POST">
-              <button type="submit">Cancel</button>
-            </form>
-            <a href="{{ url_for('edit', res_id=res.id) }}">
-              <button type="button">Edit</button>
-            </a>
-          </div>
-        </li>
-      {% endfor %}
-    </ul>
+    <table class="reservation-table">
+      <thead>
+        <tr>
+          <th>Account</th>
+          <th>Requester</th>
+          <th>Start Time</th>
+          <th>End Time</th>
+          <th>Actions</th>
+        </tr>
+      </thead>
+      <tbody>
+        {% for res in reservations %}
+          <tr class="reservation-row">
+            <td>{{ res.account_name }}</td>
+            <td>{{ res.requester_name }}</td>
+            <td>{{ res.start_time.strftime('%b %d, %Y %I:%M %p') }}</td>
+            <td>{{ res.end_time.strftime('%b %d, %Y %I:%M %p') }}</td>
+            <td class="action-buttons">
+              <form action="{{ url_for('delete', res_id=res.id) }}" method="POST" style="display:inline;">
+                <button type="submit">Cancel</button>
+              </form>
+              <a href="{{ url_for('edit', res_id=res.id) }}">
+                <button type="button">Edit</button>
+              </a>
+            </td>
+          </tr>
+        {% endfor %}
+      </tbody>
+    </table>
   </div>
 </body>
 </html>
