@@ -2,7 +2,7 @@ from scapy.all import RawPcapReader, PcapWriter, Ether, IP, TCP, UDP, Raw
 from scapy.utils import PcapReader
 from datetime import datetime, timezone
 
-def rewrite_soupbin_to_udp_with_nanos(
+def rewrite_soupbin_to_udp_minimal(
     input_pcap, output_pcap,
     custom_dst_ip, custom_dst_port, custom_dst_mac,
     custom_hex_header
@@ -17,84 +17,69 @@ def rewrite_soupbin_to_udp_with_nanos(
             ll_type = reader.linktype
     except Exception as e:
         print(f"[!] Failed to determine link-layer type: {e}")
-        ll_type = 1  # Default to Ethernet
+        ll_type = 1  # default to Ethernet
 
-    pcap_writer = PcapWriter(output_pcap, append=False, sync=True, linktype=ll_type)
-
-    total_packets = 0
-    converted_packets = 0
-    skipped_due_to_format = 0
-    skipped_due_to_no_payload = 0
+    pcap_writer = PcapWriter(output_pcap, append=False, sync=False, linktype=ll_type)
+    processed_packets = []
 
     for pkt_data, pkt_metadata in RawPcapReader(input_pcap):
-        total_packets += 1
         try:
             if ll_type != 1:
-                print(f"[!] Skipping unsupported link-layer type {ll_type}")
+                continue  # Only handle Ethernet
+
+            ether_pkt = Ether(pkt_data)
+
+            if not ether_pkt.haslayer(IP) or not ether_pkt.haslayer(TCP) or not ether_pkt.haslayer(Raw):
                 continue
 
-            pkt = Ether(pkt_data)
-            if not pkt.haslayer(TCP):
-                skipped_due_to_format += 1
-                continue
-            if not pkt.haslayer(Raw):
-                skipped_due_to_no_payload += 1
-                continue
+            original_ip = ether_pkt[IP]
+            original_raw = ether_pkt[Raw].load
+            original_udp_sport = ether_pkt[TCP].sport
 
-            raw_data = bytes(pkt[Raw].load)
-            new_payload = b""
-
-            while raw_data:
-                if len(raw_data) < 3:
-                    print("[!] Not enough data for header, skipping remaining payload")
+            # Strip SoupBinTCP headers and prepend custom header
+            payload = b""
+            while original_raw:
+                if len(original_raw) < 3:
                     break
-
-                length_bytes = raw_data[:2]
-                message_length = int.from_bytes(length_bytes, byteorder='big')
-
-                if message_length < 1 or len(raw_data) < message_length + 2:
-                    print(f"[!] Malformed message or too short: len={message_length}")
+                msg_len = int.from_bytes(original_raw[:2], byteorder='little')  # adjust if big-endian
+                if msg_len < 1 or len(original_raw) < msg_len + 2:
                     break
+                payload += custom_header_bytes + original_raw[3:msg_len + 2]
+                original_raw = original_raw[msg_len + 2:]
 
-                payload = custom_header_bytes + raw_data[3:message_length + 2]
-                new_payload += payload
-                raw_data = raw_data[message_length + 2:]
-
-            if not new_payload:
-                print("[!] Packet contained no valid SoupBinTCP messages")
+            if not payload:
                 continue
 
-            src_mac = pkt[Ether].src
-            new_packet = Ether(src=src_mac, dst=custom_dst_mac) / \
-                         IP(src=pkt[IP].src, dst=custom_dst_ip) / \
-                         UDP(sport=pkt[TCP].sport, dport=custom_dst_port) / \
-                         Raw(load=new_payload)
+            # Replace only IP layer, remove TCP
+            ether_pkt.dst = custom_dst_mac
+            new_ip = IP(
+                src=original_ip.src,
+                dst=custom_dst_ip,
+                ttl=original_ip.ttl,
+                id=original_ip.id,
+                flags=original_ip.flags
+            )
+            new_udp = UDP(sport=original_udp_sport, dport=custom_dst_port)
+            ether_pkt.remove_payload()
+            ether_pkt /= new_ip / new_udp / Raw(payload)
 
-            # Set timestamp
-            ts_sec = pkt_metadata.sec
-            ts_usec = pkt_metadata.usec
-            ts_nsec = ts_usec * 1000
-            new_packet.time = ts_sec + ts_nsec / 1_000_000_000
+            # Apply nanosecond timestamp
+            ether_pkt.time = pkt_metadata.sec + pkt_metadata.usec / 1_000_000_000
 
-            # Log the timestamp and payload info
-            dt = datetime.fromtimestamp(new_packet.time, tz=timezone.utc)
-            print(f"[✓] Written packet at {dt.strftime('%Y-%m-%d %H:%M:%S.')}{ts_nsec % 1_000_000_000:09d} with {len(new_payload)} bytes")
-
-            pcap_writer.write(new_packet)
-            converted_packets += 1
+            processed_packets.append(ether_pkt)
 
         except Exception as e:
-            print(f"[!] Error parsing packet: {e}")
+            print(f"[!] Skipping packet due to error: {e}")
             continue
 
-    pcap_writer.close()
+    # Sort packets by time for clean output
+    processed_packets.sort(key=lambda p: p.time)
+    for pkt in processed_packets:
+        pcap_writer.write(pkt)
 
-    print("\n🔍 Summary")
-    print(f"  Total packets read      : {total_packets}")
-    print(f"  Converted successfully  : {converted_packets}")
-    print(f"  Skipped (no TCP)        : {skipped_due_to_format}")
-    print(f"  Skipped (no Raw payload): {skipped_due_to_no_payload}")
-    print(f"  Output written to       : {output_pcap}")
+    pcap_writer.close()
+    print(f"\n✅ Wrote {len(processed_packets)} packets to '{output_pcap}' with nanosecond timestamps.")
+
 
 # Example usage
 if __name__ == "__main__":
@@ -105,7 +90,7 @@ if __name__ == "__main__":
     custom_dst_mac = "AA:BB:CC:DD:EE:FF"
     custom_hex_header = "0102030405060708090A0B0C0D0E0F10"
 
-    rewrite_soupbin_to_udp_with_nanos(
+    rewrite_soupbin_to_udp_minimal(
         input_pcap=input_pcap_file,
         output_pcap=output_pcap_file,
         custom_dst_ip=custom_dst_ip,
