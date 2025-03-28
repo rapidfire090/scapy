@@ -1,31 +1,37 @@
-from scapy.all import RawPcapReader, PcapWriter, Ether, IP, TCP, UDP, Raw
+from scapy.all import RawPcapReader, PcapWriter, conf, Ether, IP, TCP, UDP, Raw
+from scapy.utils import PcapReader
+from scapy.layers.l2 import L2Types
 from datetime import datetime, timezone
 
 def rewrite_soupbin_to_udp_with_nanos(input_pcap, output_pcap, custom_dst_ip, custom_dst_port, custom_dst_mac, custom_hex_header):
-    """
-    Reads a PCAP file using RawPcapReader to preserve nanosecond timestamps,
-    removes SoupBinTCP headers, replaces them with a custom 16-byte header,
-    converts TCP to UDP, and writes to a new PCAP file using only valid Ether() packets.
-    """
     custom_header_bytes = bytes.fromhex(custom_hex_header)
     if len(custom_header_bytes) != 16:
         raise ValueError("Custom hex header must be exactly 16 bytes (32 hex characters).")
 
-    pcap_writer = PcapWriter(output_pcap, append=False, sync=True)
+    # 🔍 Detect original link-layer type
+    try:
+        with PcapReader(input_pcap) as reader:
+            ll_type = reader.linktype
+    except Exception as e:
+        print(f"[!] Failed to determine link-layer type: {e}")
+        ll_type = 1  # Default to Ethernet if unknown
+
+    # 🧠 Use PcapWriter with the correct link-layer type
+    pcap_writer = PcapWriter(output_pcap, append=False, sync=True, linktype=ll_type)
 
     for pkt_data, pkt_metadata in RawPcapReader(input_pcap):
         try:
-            ether_pkt = Ether(pkt_data)
-
-            # ✅ Ensure packet is a valid Ethernet frame
-            if not ether_pkt.haslayer(Ether):
-                print("[!] Skipping non-Ethernet packet.")
+            # Use appropriate decoder — assuming Ethernet (DLT 1)
+            if ll_type == 1:
+                pkt = Ether(pkt_data)
+            else:
+                print(f"[!] Unsupported link-layer type {ll_type}, skipping packet.")
                 continue
 
-            if not ether_pkt.haslayer(TCP) or not ether_pkt.haslayer(Raw):
-                continue  # Skip non-TCP or no payload
+            if not pkt.haslayer(TCP) or not pkt.haslayer(Raw):
+                continue
 
-            raw_data = bytes(ether_pkt[Raw].load)
+            raw_data = bytes(pkt[Raw].load)
             new_payload = b""
 
             while raw_data:
@@ -43,31 +49,30 @@ def rewrite_soupbin_to_udp_with_nanos(input_pcap, output_pcap, custom_dst_ip, cu
                 raw_data = raw_data[message_length + 2:]
 
             if new_payload:
-                src_mac = ether_pkt[Ether].src
+                src_mac = pkt[Ether].src if pkt.haslayer(Ether) else "00:00:00:00:00:01"
+
                 new_packet = Ether(src=src_mac, dst=custom_dst_mac) / \
-                             IP(src=ether_pkt[IP].src, dst=custom_dst_ip) / \
-                             UDP(sport=ether_pkt[TCP].sport, dport=custom_dst_port) / \
+                             IP(src=pkt[IP].src, dst=custom_dst_ip) / \
+                             UDP(sport=pkt[TCP].sport, dport=custom_dst_port) / \
                              Raw(load=new_payload)
 
-                # Rebuild timestamp with nanosecond precision
+                # Preserve nanosecond timestamp
                 ts_sec = pkt_metadata.sec
                 ts_usec = pkt_metadata.usec
                 ts_nsec = ts_usec * 1000
-
                 new_packet.time = ts_sec + ts_nsec / 1_000_000_000
 
-                # Optional: Print human-readable timestamp
                 dt = datetime.fromtimestamp(new_packet.time, tz=timezone.utc)
                 print(f"[+] {dt.strftime('%Y-%m-%d %H:%M:%S.')}{ts_nsec % 1_000_000_000:09d}")
 
                 pcap_writer.write(new_packet)
 
         except Exception as e:
-            print(f"[!] Failed to process a packet: {e}")
+            print(f"[!] Skipping packet due to error: {e}")
             continue
 
     pcap_writer.close()
-    print(f"\n✅ Output written to '{output_pcap}' with nanosecond timestamps preserved.")
+    print(f"\n✅ Output written to '{output_pcap}' with timestamps preserved and proper link-layer type.")
 
 # Example usage
 if __name__ == "__main__":
