@@ -1,100 +1,98 @@
-from scapy.all import RawPcapReader, PcapWriter, Ether, IP, TCP, UDP, Raw
-from scapy.utils import PcapReader
-from datetime import datetime, timezone
+import dpkt
+import socket
+import struct
 
-def rewrite_soupbin_to_udp_minimal(
-    input_pcap, output_pcap,
-    custom_dst_ip, custom_dst_port, custom_dst_mac,
+def rewrite_soupbin_dpkt(
+    input_pcap,
+    output_pcap,
+    custom_dst_ip,
+    custom_dst_port,
+    custom_dst_mac,
     custom_hex_header
 ):
-    custom_header_bytes = bytes.fromhex(custom_hex_header)
-    if len(custom_header_bytes) != 16:
-        raise ValueError("Custom hex header must be exactly 16 bytes (32 hex characters).")
+    custom_header = bytes.fromhex(custom_hex_header)
+    if len(custom_header) != 16:
+        raise ValueError("Custom hex header must be exactly 16 bytes")
 
-    # Detect link-layer type
-    try:
-        with PcapReader(input_pcap) as reader:
-            ll_type = reader.linktype
-    except Exception as e:
-        print(f"[!] Failed to determine link-layer type: {e}")
-        ll_type = 1  # default to Ethernet
+    with open(input_pcap, 'rb') as f:
+        pcap = dpkt.pcap.Reader(f)
+        packets = []
 
-    pcap_writer = PcapWriter(output_pcap, append=False, sync=False, linktype=ll_type)
-    processed_packets = []
+        for ts, buf in pcap:
+            try:
+                eth = dpkt.ethernet.Ethernet(buf)
 
-    for pkt_data, pkt_metadata in RawPcapReader(input_pcap):
-        try:
-            if ll_type != 1:
-                continue  # Only handle Ethernet
+                if not isinstance(eth.data, dpkt.ip.IP):
+                    continue
+                ip = eth.data
 
-            ether_pkt = Ether(pkt_data)
+                if not isinstance(ip.data, dpkt.tcp.TCP):
+                    continue
+                tcp = ip.data
 
-            if not ether_pkt.haslayer(IP) or not ether_pkt.haslayer(TCP) or not ether_pkt.haslayer(Raw):
+                if not tcp.data:
+                    continue
+
+                raw_data = tcp.data
+                payload_parts = []
+                while len(raw_data) >= 3:
+                    msg_len = int.from_bytes(raw_data[:2], byteorder='little')
+                    if msg_len < 1 or len(raw_data) < msg_len + 2:
+                        break
+                    payload_parts.append(custom_header + raw_data[3:msg_len + 2])
+                    raw_data = raw_data[msg_len + 2:]
+
+                if not payload_parts:
+                    continue
+
+                payload = b''.join(payload_parts)
+
+                # Build new IP/UDP packet
+                udp = dpkt.udp.UDP(
+                    sport=tcp.sport,
+                    dport=custom_dst_port,
+                    data=payload
+                )
+                udp.ulen = len(udp)
+
+                new_ip = dpkt.ip.IP(
+                    src=ip.src,
+                    dst=socket.inet_aton(custom_dst_ip),
+                    p=dpkt.ip.IP_PROTO_UDP,
+                    ttl=ip.ttl,
+                    id=ip.id,
+                    off=ip.off,
+                    data=udp
+                )
+                new_ip.len = len(new_ip)
+
+                eth.dst = bytes.fromhex(custom_dst_mac.replace(':', ''))
+                eth.data = new_ip
+
+                packets.append((ts, bytes(eth)))
+
+            except Exception as e:
+                print(f"[!] Skipped a packet: {e}")
                 continue
 
-            original_ip = ether_pkt[IP]
-            original_raw = ether_pkt[Raw].load
-            original_udp_sport = ether_pkt[TCP].sport
+    # Sort packets by timestamp
+    packets.sort(key=lambda p: p[0])
 
-            # Strip SoupBinTCP headers and prepend custom header
-            payload = b""
-            while original_raw:
-                if len(original_raw) < 3:
-                    break
-                msg_len = int.from_bytes(original_raw[:2], byteorder='little')  # adjust if big-endian
-                if msg_len < 1 or len(original_raw) < msg_len + 2:
-                    break
-                payload += custom_header_bytes + original_raw[3:msg_len + 2]
-                original_raw = original_raw[msg_len + 2:]
+    with open(output_pcap, 'wb') as f:
+        writer = dpkt.pcap.Writer(f)
+        for ts, pkt in packets:
+            writer.writepkt(pkt, ts=ts)
 
-            if not payload:
-                continue
-
-            # Replace only IP layer, remove TCP
-            ether_pkt.dst = custom_dst_mac
-            new_ip = IP(
-                src=original_ip.src,
-                dst=custom_dst_ip,
-                ttl=original_ip.ttl,
-                id=original_ip.id,
-                flags=original_ip.flags
-            )
-            new_udp = UDP(sport=original_udp_sport, dport=custom_dst_port)
-            ether_pkt.remove_payload()
-            ether_pkt /= new_ip / new_udp / Raw(payload)
-
-            # Apply nanosecond timestamp
-            ether_pkt.time = pkt_metadata.sec + pkt_metadata.usec / 1_000_000_000
-
-            processed_packets.append(ether_pkt)
-
-        except Exception as e:
-            print(f"[!] Skipping packet due to error: {e}")
-            continue
-
-    # Sort packets by time for clean output
-    processed_packets.sort(key=lambda p: p.time)
-    for pkt in processed_packets:
-        pcap_writer.write(pkt)
-
-    pcap_writer.close()
-    print(f"\n✅ Wrote {len(processed_packets)} packets to '{output_pcap}' with nanosecond timestamps.")
+    print(f"\n✅ Wrote {len(packets)} packets to '{output_pcap}' (dpkt, fast mode)")
 
 
 # Example usage
-if __name__ == "__main__":
-    input_pcap_file = "soupbin_tcp_data.pcap"
-    output_pcap_file = "modified_soupbin_udp.pcap"
-    custom_dst_ip = "192.168.1.100"
-    custom_dst_port = 5000
-    custom_dst_mac = "AA:BB:CC:DD:EE:FF"
-    custom_hex_header = "0102030405060708090A0B0C0D0E0F10"
-
-    rewrite_soupbin_to_udp_minimal(
-        input_pcap=input_pcap_file,
-        output_pcap=output_pcap_file,
-        custom_dst_ip=custom_dst_ip,
-        custom_dst_port=custom_dst_port,
-        custom_dst_mac=custom_dst_mac,
-        custom_hex_header=custom_hex_header
+if __name__ == '__main__':
+    rewrite_soupbin_dpkt(
+        input_pcap='soupbin_tcp_data.pcap',
+        output_pcap='modified_soupbin_udp_dpkt.pcap',
+        custom_dst_ip='192.168.1.100',
+        custom_dst_port=5000,
+        custom_dst_mac='aa:bb:cc:dd:ee:ff',
+        custom_hex_header='0102030405060708090A0B0C0D0E0F10'
     )
