@@ -1,0 +1,64 @@
+# Global settings
+default_percentiles: [0.25, 0.5, 0.75, 0.9, 0.95, 0.99]
+sum_percentiles: true
+exclude_from_sum: [orders_south]
+row_order: [orders_south, orders_north, TOTAL_SUM]
+use_cache_dir: true
+
+# Authentication for CSV download (applies to all sources)
+auth:
+  user: "myuser"
+  password: "mypassword"
+
+# Time range for download (used in query params and cache keys)
+date_range:
+  start_date: "2024-03-01T08:00"
+  end_date: "2024-03-05T18:30"
+
+# Data sources (source names → URLs)
+download_sources:
+  north_orders_data: "https://example.com/north.csv"
+  south_orders_data: "https://example.com/south.csv"
+
+# Email settings
+email:
+  subject: "Speed Analysis Report"
+  from: "your.email@example.com"
+  to:
+    - "team@example.com"
+  cc:
+    - "manager@example.com"
+  smtp:
+    host: "smtp.example.com"
+    port: 587
+    username: "your.email@example.com"
+    password: "your-smtp-password"
+    use_tls: true
+
+# Dataset: orders_north
+orders_north:
+  source: "north_orders_data"
+  rename:
+    user_id: "user"
+    msg_text: "message"
+  filters:
+    message:
+      type: regex
+      value: "new order|repeat order"
+    user:
+      type: exact
+      value: ["abc123"]
+
+# Dataset: orders_south
+orders_south:
+  source: "south_orders_data"
+  rename:
+    customer: "user"
+    msg: "message"
+  filters:
+    message:
+      type: regex
+      value: "new order"
+    user:
+      type: exact
+      value: ["xyz789", "lmn456"]
