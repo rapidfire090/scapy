@@ -1,13 +1,13 @@
 // Set root HDB path
 hdbPath: "./hdb"
 
-// Define partitioned table schema
+// Define partitioned table schema with correct types
 .schema: `date xkey ([
   date: enlist 0D
   ];
-  timestamp: enlist 0Np;
-  source: enlist `;
-  speed: enlist 0n
+  timestamp: timestamp$();
+  source: `symbol$();
+  speed: real$()
 )
 
 // Parameters
@@ -25,7 +25,7 @@ genData: {
   flip `date`timestamp`source`speed! (enlist date, timestamp, source, speed)
 }
 
-// Create base HDB directory
+// Create base HDB directory if not exists
 if[not hdbPath in system "ls"; system "mkdir ", hdbPath];
 
 // Generate and save partitioned data
