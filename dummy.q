@@ -1,15 +1,15 @@
 // Root HDB path
 hdbPath: "./hdb"
 
-// Define table schema using spec.tables
+// Define table schema using correct types in spec.tables
 spec.tables: `speedtbl!(<[
-  date: date;
-  timestamp: timestamp;
-  source: symbol;
-  speed: float
+  date: `date;
+  timestamp: `timestamp;
+  source: `symbol;
+  speed: `real       / <- THIS is the correct type name
 ])
 
-// Create an empty schema table (keyed on `date`)
+// Create an empty table schema (keyed on `date`)
 .schema: `date xkey ([] 
   date: 0D#0d;
   timestamp: 0#0Np;
