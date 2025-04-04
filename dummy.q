@@ -1,12 +1,18 @@
-// Define HDB root path (relative to current directory)
+// Define HDB root path (relative to where script is run)
 hdbPath: "./hdb"
 
-// Create schema (partitioned by date)
-.schema: `date xkey ([] date: date$(); timestamp: timestamp$(); source: symbol$(); speed: float$())
+// Define the table schema (partitioned by date)
+.schema: `date xkey ([
+  date: enlist 0D
+  ];
+  timestamp: enlist 0Np;
+  source: enlist `symbol$();
+  speed: enlist 0n
+)
 
 // Parameters
 n: 1000
-dates: .z.D + til 3                        // 3 days starting from today
+dates: .z.D + til 3                         // 3 days starting from today
 sources: `sensor1`sensor2`sensor3
 
 // Function to generate dummy data for one day
@@ -19,10 +25,10 @@ genData: {
   flip `date`timestamp`source`speed! (enlist date, timestamp, source, speed)
 }
 
-// Create base HDB folder (using q command)
+// Create base HDB folder if it doesn't exist
 if[not hdbPath in system "ls"; system "mkdir ", hdbPath];
 
-// Generate and save data per day
+// Generate and save data for each day
 {
   d: x;
   t: genData d;
