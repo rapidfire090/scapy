@@ -1,20 +1,13 @@
-// Root HDB path
+// Set the HDB root path (relative to current directory)
 hdbPath: "./hdb"
 
-// Define table schema using correct types in spec.tables
-spec.tables: `speedtbl!(<[
-  date: `date;
-  timestamp: `timestamp;
-  source: `symbol;
-  speed: `real       / <- THIS is the correct type name
-])
-
-// Create an empty table schema (keyed on `date`)
-.schema: `date xkey ([] 
-  date: 0D#0d;
+// Define the partitioned table schema with int speed column
+.schema: `date xkey ([
+  date: 0D#0d
+  ];
   timestamp: 0#0Np;
   source: `symbol$();
-  speed: 0#0n
+  speed: int$()
 )
 
 // Parameters
@@ -22,27 +15,29 @@ n: 1000
 dates: .z.D + til 3
 sources: `sensor1`sensor2`sensor3
 
-// Function to generate dummy data
+// Corrected dummy data generator
 genData: {
   d: x;
   rows: n div count dates;
   timestamp: d + 0D00:00:00 + rows?1D;
   source: rows?sources;
   speed: 50 + 10 * rand rows;
-  flip `date`timestamp`source`speed! (enlist d, timestamp, source, speed)
+  speedInt: floor speed;
+  date: rows#d;
+  flip `date`timestamp`source`speed! (date; timestamp; source; speedInt)
 }
 
-// Ensure HDB base path exists
+// Create the base HDB directory if needed
 if[not hdbPath in system "ls"; system "mkdir ", hdbPath];
 
-// Generate and save partitioned data using spec.tables
+// Generate and save partitioned data
 {
   d: x;
   t: genData d;
   path: hdbPath , "/" , string d;
   if[not path in system "ls"; system "mkdir ", path];
   `:path/set t;
-  .Q.dpft[hdbPath; `:path; spec.tables[`speedtbl]; `date]
+  .Q.dpft[hdbPath; `:path; `.schema; `date]
 } each dates;
 
-"✅ Dummy data saved to HDB using spec.tables"
+"✅ Dummy data written to HDB with speed as int"
