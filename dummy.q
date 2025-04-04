@@ -2,12 +2,11 @@
 hdbPath: "./hdb"
 
 // Define partitioned table schema with correct types
-.schema: `date xkey ([
-  date: enlist 0D
-  ];
-  timestamp: timestamp$();
-  source: `symbol$();
-  speed: real$()
+.schema: `date xkey ([] 
+  date: 0D#0d; 
+  timestamp: 0#0Np; 
+  source: 0#`; 
+  speed: 0#0n
 )
 
 // Parameters
