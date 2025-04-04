@@ -1,12 +1,12 @@
-// Define HDB root path (relative to where script is run)
+// Set root HDB path
 hdbPath: "./hdb"
 
-// Define the table schema (partitioned by date)
+// Define partitioned table schema
 .schema: `date xkey ([
   date: enlist 0D
   ];
   timestamp: enlist 0Np;
-  source: enlist `symbol$();
+  source: enlist `;
   speed: enlist 0n
 )
 
@@ -15,7 +15,7 @@ n: 1000
 dates: .z.D + til 3                         // 3 days starting from today
 sources: `sensor1`sensor2`sensor3
 
-// Function to generate dummy data for one day
+// Generate dummy data for one day
 genData: {
   date: x;
   nDay: n div count dates;
@@ -25,10 +25,10 @@ genData: {
   flip `date`timestamp`source`speed! (enlist date, timestamp, source, speed)
 }
 
-// Create base HDB folder if it doesn't exist
+// Create base HDB directory
 if[not hdbPath in system "ls"; system "mkdir ", hdbPath];
 
-// Generate and save data for each day
+// Generate and save partitioned data
 {
   d: x;
   t: genData d;
