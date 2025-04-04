@@ -1,47 +1,48 @@
-// Set the HDB root path (relative to current directory)
+// Root HDB path
 hdbPath: "./hdb"
 
-// Define empty lists for the schema with explicit types
-emptyDates: 0D#0d;         / empty list of dates
-emptyTimestamps: 0#0Np;     / empty list of timestamps
-emptySymbols: `symbol$();   / empty list of symbols, by casting an empty list to symbol type
-emptyFloats: 0#0n;          / empty list of floats
+// Define table schema using spec.tables
+spec.tables: `speedtbl!(<[
+  date: date;
+  timestamp: timestamp;
+  source: symbol;
+  speed: float
+])
 
-// Define the partitioned table schema using the above empty lists
-.schema: `date xkey ([
-  date: emptyDates
-  ];
-  timestamp: emptyTimestamps;
-  source: emptySymbols;
-  speed: emptyFloats
+// Create an empty schema table (keyed on `date`)
+.schema: `date xkey ([] 
+  date: 0D#0d;
+  timestamp: 0#0Np;
+  source: `symbol$();
+  speed: 0#0n
 )
 
 // Parameters
 n: 1000
-dates: .z.D + til 3         / 3 days starting from today
+dates: .z.D + til 3
 sources: `sensor1`sensor2`sensor3
 
-// Function to generate dummy data for one day
+// Function to generate dummy data
 genData: {
   d: x;
   rows: n div count dates;
-  timestamp: d + 0D00:00:00 + rows?1D;  / Random timestamps within the day
-  source: rows?sources;                / Randomly pick a sensor source for each row
-  speed: 50 + 10 * rand rows;           / Random speed values around 50
+  timestamp: d + 0D00:00:00 + rows?1D;
+  source: rows?sources;
+  speed: 50 + 10 * rand rows;
   flip `date`timestamp`source`speed! (enlist d, timestamp, source, speed)
 }
 
-// Create the base HDB directory if it doesn't exist
+// Ensure HDB base path exists
 if[not hdbPath in system "ls"; system "mkdir ", hdbPath];
 
-// Generate and save partitioned data for each date
+// Generate and save partitioned data using spec.tables
 {
   d: x;
   t: genData d;
   path: hdbPath , "/" , string d;
   if[not path in system "ls"; system "mkdir ", path];
   `:path/set t;
-  .Q.dpft[hdbPath; `:path; `.schema; `date]
+  .Q.dpft[hdbPath; `:path; spec.tables[`speedtbl]; `date]
 } each dates;
 
-"✅ Dummy data written to HDB successfully"
+"✅ Dummy data saved to HDB using spec.tables"
