@@ -1,10 +1,10 @@
-// Set the HDB root path (relative to the current directory)
+// Set the HDB root path (relative to current directory)
 hdbPath: "./hdb"
 
 // Define empty lists for the schema with explicit types
 emptyDates: 0D#0d;         / empty list of dates
 emptyTimestamps: 0#0Np;     / empty list of timestamps
-emptySymbols: `symbol$();   / empty list of symbols (cast an empty list to symbol)
+emptySymbols: `symbol$();   / empty list of symbols, by casting an empty list to symbol type
 emptyFloats: 0#0n;          / empty list of floats
 
 // Define the partitioned table schema using the above empty lists
@@ -18,7 +18,7 @@ emptyFloats: 0#0n;          / empty list of floats
 
 // Parameters
 n: 1000
-dates: .z.D + til 3          / 3 days starting from today
+dates: .z.D + til 3         / 3 days starting from today
 sources: `sensor1`sensor2`sensor3
 
 // Function to generate dummy data for one day
