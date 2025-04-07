@@ -1,0 +1,36 @@
+import pandas as pd
+from influxdb_client import InfluxDBClient, Point, WritePrecision
+from influxdb_client.client.write_api import SYNCHRONOUS
+from datetime import datetime
+
+# InfluxDB connection settings
+influxdb_url = "http://localhost:8086"  # or your InfluxDB host
+token = "your_api_token_here"
+org = "your_org"
+bucket = "your_bucket"
+
+# CSV file path
+csv_file = "your_file.csv"
+
+# Read and process the CSV
+df = pd.read_csv(csv_file)
+
+# Convert timestamp
+df['timestamp'] = pd.to_datetime(df['timestamp'], format="%Y-%m-%d %H:%M:%S.%f")
+
+# Connect to InfluxDB
+client = InfluxDBClient(url=influxdb_url, token=token, org=org)
+write_api = client.write_api(write_options=SYNCHRONOUS)
+
+# Write each row to InfluxDB
+for _, row in df.iterrows():
+    point = (
+        Point("your_measurement_name")  # Replace with appropriate measurement
+        .tag("channel", str(row["channel"]))
+        .field("message", str(row["message"]))
+        .field("speed", float(row["speed"]))
+        .time(row["timestamp"], WritePrecision.NS)
+    )
+    write_api.write(bucket=bucket, org=org, record=point)
+
+client.close()
