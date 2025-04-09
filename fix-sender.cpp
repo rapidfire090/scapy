@@ -1,10 +1,10 @@
-// fix_sender_tcp.cpp
 #include <iostream>
 #include <sstream>
 #include <unistd.h>
 #include <netinet/in.h>
 #include <arpa/inet.h>
 #include <cstring>
+#include <algorithm>
 
 std::string generate_fix_message(int seq_num) {
     std::ostringstream fix;
@@ -19,15 +19,28 @@ std::string generate_fix_message(int seq_num) {
     return msg;
 }
 
-int main() {
-    const char* server_ip = "192.168.1.2";
-    const int server_port = 4000;
+int main(int argc, char* argv[]) {
+    if (argc != 3) {
+        std::cerr << "Usage: " << argv[0] << " <server_ip> <server_port>\n";
+        return 1;
+    }
+
+    const char* server_ip = argv[1];
+    int server_port = std::stoi(argv[2]);
 
     int sock = socket(AF_INET, SOCK_STREAM, 0);
+    if (sock < 0) {
+        perror("socket");
+        return 1;
+    }
+
     sockaddr_in server_addr {};
     server_addr.sin_family = AF_INET;
     server_addr.sin_port = htons(server_port);
-    inet_pton(AF_INET, server_ip, &server_addr.sin_addr);
+    if (inet_pton(AF_INET, server_ip, &server_addr.sin_addr) <= 0) {
+        std::cerr << "Invalid IP address: " << server_ip << "\n";
+        return 1;
+    }
 
     if (connect(sock, (sockaddr*)&server_addr, sizeof(server_addr)) < 0) {
         perror("connect");
