@@ -5,6 +5,7 @@
 #include <arpa/inet.h>
 #include <unistd.h>
 
+// Relay thread: receives from client_sock, forwards to out_ip:out_port
 void relay(int client_sock, const char* out_ip, int out_port) {
     int forward_sock = socket(AF_INET, SOCK_STREAM, 0);
     if (forward_sock < 0) {
@@ -36,14 +37,15 @@ void relay(int client_sock, const char* out_ip, int out_port) {
 }
 
 int main(int argc, char* argv[]) {
-    if (argc != 4) {
-        std::cerr << "Usage: " << argv[0] << " <listen_port> <forward_ip> <forward_port>\n";
+    if (argc != 5) {
+        std::cerr << "Usage: " << argv[0] << " <listen_ip> <listen_port> <forward_ip> <forward_port>\n";
         return 1;
     }
 
-    int listen_port = std::stoi(argv[1]);
-    const char* forward_ip = argv[2];
-    int forward_port = std::stoi(argv[3]);
+    const char* listen_ip = argv[1];
+    int listen_port = std::stoi(argv[2]);
+    const char* forward_ip = argv[3];
+    int forward_port = std::stoi(argv[4]);
 
     int listen_sock = socket(AF_INET, SOCK_STREAM, 0);
     if (listen_sock < 0) {
@@ -57,7 +59,10 @@ int main(int argc, char* argv[]) {
     sockaddr_in listen_addr {};
     listen_addr.sin_family = AF_INET;
     listen_addr.sin_port = htons(listen_port);
-    listen_addr.sin_addr.s_addr = INADDR_ANY;
+    if (inet_pton(AF_INET, listen_ip, &listen_addr.sin_addr) <= 0) {
+        std::cerr << "Invalid listen IP: " << listen_ip << "\n";
+        return 1;
+    }
 
     if (bind(listen_sock, (sockaddr*)&listen_addr, sizeof(listen_addr)) < 0) {
         perror("bind");
@@ -69,8 +74,8 @@ int main(int argc, char* argv[]) {
         return 1;
     }
 
-    std::cout << "Listening on port " << listen_port << " and forwarding to "
-              << forward_ip << ":" << forward_port << std::endl;
+    std::cout << "Listening on " << listen_ip << ":" << listen_port
+              << " and forwarding to " << forward_ip << ":" << forward_port << std::endl;
 
     while (true) {
         sockaddr_in client_addr {};
