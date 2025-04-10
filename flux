@@ -1,15 +1,9 @@
-import "experimental"
-
-percentiles = ["p50", "p90", "p95", "99_9"]
-
-data = from(bucket: "your_bucket")
-  |> range(start: -1h)  // narrow to recent data
+from(bucket: "your_bucket")
+  |> range(start: -30d)  // adjust as needed (e.g. -7d, -90d, or a fixed start time)
   |> filter(fn: (r) => 
     r._measurement == "aggregated_stats" and 
-    contains(value: r._field, set: percentiles) and
-    r.MP == "SensorA"  // filter by tag if needed
+    (r._field == "p50" or r._field == "p90" or r._field == "p95")
   )
-  |> last()  // get the most recent value per field
-  |> keep(columns: ["_field", "_value"])
-
-experimental.toRows()
+  |> filter(fn: (r) => r.MP == "SensorA")  // optional: filter by MP tag
+  |> aggregateWindow(every: 1h, fn: mean, createEmpty: false)  // smooth over time (optional)
+  |> yield(name: "percentiles_over_time")
