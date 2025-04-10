@@ -3,7 +3,6 @@ import pandas as pd
 from influxdb_client import InfluxDBClient, Point, WritePrecision
 from influxdb_client.client.write_api import WriteOptions
 from glob import glob
-from datetime import datetime
 
 # InfluxDB connection setup
 influxdb_url = "http://localhost:8086"
@@ -11,6 +10,9 @@ token = "your_api_token_here"
 org = "your_org"
 bucket = "your_bucket"
 csv_dir = "./your_aggregated_csv_folder"
+
+# Static measurement name
+measurement = "aggregated_stats"
 
 # Create InfluxDB client and write API
 client = InfluxDBClient(url=influxdb_url, token=token, org=org)
@@ -48,12 +50,11 @@ for filepath in glob(os.path.join(csv_dir, "*.csv")):
         # Build Influx points
         points = []
         for idx, row in df.iterrows():
-            measurement = row["MP"]
+            mp_tag = row["MP"]
             window_tag = row.get("window", "unknown")
 
-            point = Point(str(measurement)).tag("window", window_tag)
+            point = Point(measurement).tag("MP", mp_tag).tag("window", window_tag)
 
-            # Add all numeric fields
             for field in [
                 "Max", "Mean", "Min",
                 "10", "25", "5", "50", "75",
@@ -64,7 +65,12 @@ for filepath in glob(os.path.join(csv_dir, "*.csv")):
                     safe_field = field.replace(".", "_")  # Replace dot for field compatibility
                     point = point.field(safe_field, float(row[field]))
 
-            point = point.time(int(timestamp_ns.iloc[idx]), WritePrecision.NS)
+            ts_ns = int(timestamp_ns.iloc[idx])
+            point = point.time(ts_ns, WritePrecision.NS)
+
+            # Print InfluxDB line protocol string
+            print(point.to_line_protocol())
+
             points.append(point)
 
         write_api.write(bucket=bucket, org=org, record=points)
