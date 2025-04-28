@@ -5,8 +5,7 @@ import re
 import threading
 import argparse
 
-# Dynamic Prometheus metrics storage
-metrics = {}
+# Dynamic Prometheus metrics storage\metrics = {}
 
 # Regex to find important blocks and key-value pairs
 CI_NETIF_DUMP_HEADER_RE = re.compile(r'ci_netif_dump_to_logger', re.IGNORECASE)
@@ -22,7 +21,9 @@ def scrape_onload_stats(scrape_interval):
     """
     while True:
         try:
-            output = subprocess.check_output(['onload_stackdump', 'lots'], universal_newlines=True)
+            output = subprocess.check_output(
+                ['onload_stackdump', 'lots'], universal_newlines=True
+            )
             if not output.strip():
                 time.sleep(scrape_interval)
                 continue
@@ -40,56 +41,59 @@ def scrape_onload_stats(scrape_interval):
                     continue
 
                 if inside_dump:
-                    stack_info = STACK_INFO_RE.search(line)
-                    if stack_info:
-                        current_stack_id = stack_info.group(1)
+                    m_stack = STACK_INFO_RE.search(line)
+                    if m_stack:
+                        current_stack_id = m_stack.group(1)
                         continue
 
-                    pid_info = PID_INFO_RE.search(line)
-                    if pid_info:
-                        current_onload_version, current_pid = pid_info.groups()
+                    m_pid = PID_INFO_RE.search(line)
+                    if m_pid:
+                        current_onload_version, current_pid = m_pid.groups()
                         continue
 
-                    stats_header = CI_NETIF_STATS_HEADER_RE.search(line)
-                    if stats_header:
-                        stats_stack_id = stats_header.group(1)
-                        if stats_stack_id == current_stack_id:
-                            ready_for_stats = True
-                        else:
-                            ready_for_stats = False
+                    m_stats_header = CI_NETIF_STATS_HEADER_RE.search(line)
+                    if m_stats_header:
+                        stats_stack_id = m_stats_header.group(1)
+                        ready_for_stats = (stats_stack_id == current_stack_id)
                         continue
 
                     if ready_for_stats:
-                        stat_match = CI_NETIF_STATS_LINE_RE.search(line)
-                        if stat_match:
-                            key, value = stat_match.groups()
+                        m_line = CI_NETIF_STATS_LINE_RE.search(line)
+                        if m_line:
+                            key, val = m_line.groups()
                             metric_name = f"onload_netif_{key.lower()}"
-
+                            # Initialize Gauge if needed
                             if metric_name not in metrics:
                                 metrics[metric_name] = Gauge(
                                     metric_name,
                                     f"Onload netif stat {key}",
                                     ['stack_id', 'onload_version', 'pid']
                                 )
-
+                            # Prepare labels
                             labels = {
                                 'stack_id': current_stack_id,
                                 'onload_version': current_onload_version,
                                 'pid': current_pid
                             }
-                            seen_labels.add((metric_name, frozenset(labels.items())))
-                            metrics[metric_name].labels(**labels).set(int(value))
+                            # Record seen labelset for cleanup
+                            labelset = tuple(labels[name] for name in metrics[metric_name]._labelnames)
+                            labels_as_set = frozenset(labels.items())
+                            seen_labels.add((metric_name, labels_as_set))
+                            # Set metric value
+                            metrics[metric_name].labels(**labels).set(int(val))
 
             # Cleanup stale metrics
             for metric_name, metric_obj in metrics.items():
                 to_remove = []
-                for labelset in list(metric_obj._metrics.keys()):
-                    labels_dict = dict(labelset)
-                    labels_as_set = frozenset(labels_dict.items())
+                for label_tuple in list(metric_obj._metrics.keys()):
+                    # Reconstruct dict for this label tuple
+                    names = metric_obj._labelnames
+                    label_dict = dict(zip(names, label_tuple))
+                    labels_as_set = frozenset(label_dict.items())
                     if (metric_name, labels_as_set) not in seen_labels:
-                        to_remove.append(labels_dict)
-                for label_dict in to_remove:
-                    metric_obj.remove(**label_dict)
+                        to_remove.append(label_tuple)
+                for label_tuple in to_remove:
+                    metric_obj.remove(*label_tuple)
 
         except Exception as e:
             print(f"Error scraping onload_stackdump lots: {e}")
@@ -98,7 +102,9 @@ def scrape_onload_stats(scrape_interval):
 
 
 if __name__ == '__main__':
-    parser = argparse.ArgumentParser(description='Onload ci_netif_stats Exporter')
+    parser = argparse.ArgumentParser(
+        description='Onload ci_netif_stats Exporter'
+    )
     parser.add_argument(
         '--scrape-interval', type=int, default=5,
         help='Seconds between Onload scrapes'
@@ -113,9 +119,12 @@ if __name__ == '__main__':
     start_http_server(args.port)
 
     # Launch background thread for scraping
-    t = threading.Thread(target=scrape_onload_stats, args=(args.scrape_interval,))
-    t.daemon = True
-    t.start()
+    thread = threading.Thread(
+        target=scrape_onload_stats,
+        args=(args.scrape_interval,)
+    )
+    thread.daemon = True
+    thread.start()
 
     # Keep main thread alive indefinitely
     while True:
