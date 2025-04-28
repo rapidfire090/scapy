@@ -11,7 +11,7 @@ metrics = {}
 # Regex to find important blocks and key-value pairs
 CI_NETIF_DUMP_HEADER_RE = re.compile(r'ci_netif_dump_to_logger', re.IGNORECASE)
 STACK_INFO_RE = re.compile(r'stack=(\d+)', re.IGNORECASE)
-PID_INFO_RE = re.compile(r'Onload\s+([\d\.]+).*?pid\s+(\d+)', re.IGNORECASE)
+PID_INFO_RE = re.compile(r'Onload\s+([\d\.]+).*?pid=(\d+)', re.IGNORECASE)
 CI_NETIF_STATS_HEADER_RE = re.compile(r'ci_netif_stats:\s*(\d+)', re.IGNORECASE)
 CI_NETIF_STATS_LINE_RE = re.compile(r'\s*(\w+)\s*:\s*(\d+)', re.IGNORECASE)
 
@@ -28,6 +28,7 @@ def scrape_onload_stats(scrape_interval):
             current_onload_version = None
             current_pid = None
             ready_for_stats = False
+            seen_labels = set()
 
             for line in output.splitlines():
                 if CI_NETIF_DUMP_HEADER_RE.search(line):
@@ -67,11 +68,23 @@ def scrape_onload_stats(scrape_interval):
                                     ['stack_id', 'onload_version', 'pid']
                                 )
 
-                            metrics[metric_name].labels(
-                                stack_id=current_stack_id,
-                                onload_version=current_onload_version,
-                                pid=current_pid
-                            ).set(int(value))
+                            labels = {
+                                'stack_id': current_stack_id,
+                                'onload_version': current_onload_version,
+                                'pid': current_pid
+                            }
+                            seen_labels.add((metric_name, tuple(labels.items())))
+                            metrics[metric_name].labels(**labels).set(int(value))
+
+            # Cleanup stale metrics
+            for metric_name, metric_obj in metrics.items():
+                to_remove = []
+                for labelset in list(metric_obj._metrics.keys()):
+                    label_dict = tuple(sorted(labelset.items()))
+                    if (metric_name, label_dict) not in seen_labels:
+                        to_remove.append(labelset)
+                for labelset in to_remove:
+                    metric_obj.remove(**labelset)
 
         except Exception as e:
             print(f"Error scraping onload_stackdump lots: {e}")
