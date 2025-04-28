@@ -23,6 +23,10 @@ def scrape_onload_stats(scrape_interval):
     while True:
         try:
             output = subprocess.check_output(['onload_stackdump', 'lots'], universal_newlines=True)
+            if not output.strip():
+                time.sleep(scrape_interval)
+                continue
+
             inside_dump = False
             current_stack_id = None
             current_onload_version = None
@@ -73,15 +77,15 @@ def scrape_onload_stats(scrape_interval):
                                 'onload_version': current_onload_version,
                                 'pid': current_pid
                             }
-                            seen_labels.add((metric_name, tuple(labels.items())))
+                            seen_labels.add((metric_name, frozenset(labels.items())))
                             metrics[metric_name].labels(**labels).set(int(value))
 
             # Cleanup stale metrics
             for metric_name, metric_obj in metrics.items():
                 to_remove = []
                 for labelset in list(metric_obj._metrics.keys()):
-                    label_dict = tuple(sorted(labelset.items()))
-                    if (metric_name, label_dict) not in seen_labels:
+                    labels_as_set = frozenset(labelset.items())
+                    if (metric_name, labels_as_set) not in seen_labels:
                         to_remove.append(labelset)
                 for labelset in to_remove:
                     metric_obj.remove(**labelset)
