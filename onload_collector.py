@@ -6,7 +6,7 @@ import threading
 import argparse
 
 # Dynamic Prometheus metrics storage
-enmetrics = {}
+metrics = {}
 
 # Regex to find important blocks and key-value pairs
 CI_NETIF_DUMP_HEADER_RE = re.compile(r'ci_netif_dump_to_logger', re.IGNORECASE)
@@ -14,9 +14,6 @@ STACK_INFO_RE = re.compile(r'stack=(\d+)', re.IGNORECASE)
 PID_INFO_RE = re.compile(r'Onload\s+([\d\.]+).*?pid=(\d+)', re.IGNORECASE)
 CI_NETIF_STATS_HEADER_RE = re.compile(r'ci_netif_stats:\s*(\d+)', re.IGNORECASE)
 CI_NETIF_STATS_LINE_RE = re.compile(r'\s*(\w+)\s*:\s*(\d+)', re.IGNORECASE)
-
-# The metrics dict holds Gauge objects by metric name
-enmetrics = {}
 
 
 def scrape_onload_stats(scrape_interval):
@@ -28,9 +25,6 @@ def scrape_onload_stats(scrape_interval):
             output = subprocess.check_output(
                 ['onload_stackdump', 'lots'], universal_newlines=True
             )
-            if not output.strip():
-                time.sleep(scrape_interval)
-                continue
 
             inside_dump = False
             current_stack_id = None
@@ -39,6 +33,7 @@ def scrape_onload_stats(scrape_interval):
             ready_for_stats = False
             seen_labels = set()
 
+            # Parse each line; if output is empty, skip parsing and proceed to cleanup
             for line in output.splitlines():
                 if CI_NETIF_DUMP_HEADER_RE.search(line):
                     inside_dump = True
@@ -66,34 +61,35 @@ def scrape_onload_stats(scrape_interval):
                         if m_line:
                             key, val = m_line.groups()
                             metric_name = f"onload_netif_{key.lower()}"
-                            # Initialize Gauge if needed
-                            if metric_name not in enmetrics:
-                                enmetrics[metric_name] = Gauge(
+
+                            if metric_name not in metrics:
+                                metrics[metric_name] = Gauge(
                                     metric_name,
                                     f"Onload netif stat {key}",
                                     ['stack_id', 'onload_version', 'pid']
                                 )
-                            # Prepare labels
+
                             labels = {
                                 'stack_id': current_stack_id,
                                 'onload_version': current_onload_version,
                                 'pid': current_pid
                             }
-                            # Record seen labelset for cleanup
-                            labels_as_set = frozenset(labels.items())
-                            seen_labels.add((metric_name, labels_as_set))
-                            # Set metric value
-                            enmetrics[metric_name].labels(**labels).set(int(val))
+                            # Track seen labels for cleanup
+                            labels_fset = frozenset(labels.items())
+                            seen_labels.add((metric_name, labels_fset))
+                            metrics[metric_name].labels(**labels).set(int(val))
 
-            # Cleanup stale metrics
-            for metric_name, metric_obj in enmetrics.items():
+            # Cleanup stale metrics, including when no output or no stacks found
+            for metric_name, metric_obj in metrics.items():
                 to_remove = []
                 for label_tuple in list(metric_obj._metrics.keys()):
-                    # Reconstruct dict for this label tuple
-                    label_dict = dict(zip(metric_obj._labelnames, label_tuple))
-                    labels_as_set = frozenset(label_dict.items())
-                    if (metric_name, labels_as_set) not in seen_labels:
+                    # Reconstruct label dict from tuple
+                    names = metric_obj._labelnames
+                    label_dict = dict(zip(names, label_tuple))
+                    labels_fset = frozenset(label_dict.items())
+                    if (metric_name, labels_fset) not in seen_labels:
                         to_remove.append(label_tuple)
+                # Remove stale labelsets
                 for label_tuple in to_remove:
                     metric_obj.remove(*label_tuple)
 
@@ -117,10 +113,7 @@ if __name__ == '__main__':
     )
     args = parser.parse_args()
 
-    # Start HTTP server for Prometheus
     start_http_server(args.port)
-
-    # Launch background thread for scraping
     thread = threading.Thread(
         target=scrape_onload_stats,
         args=(args.scrape_interval,)
@@ -128,6 +121,5 @@ if __name__ == '__main__':
     thread.daemon = True
     thread.start()
 
-    # Keep main thread alive indefinitely
     while True:
         time.sleep(60)
