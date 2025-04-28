@@ -84,11 +84,12 @@ def scrape_onload_stats(scrape_interval):
             for metric_name, metric_obj in metrics.items():
                 to_remove = []
                 for labelset in list(metric_obj._metrics.keys()):
-                    labels_as_set = frozenset(labelset.items())
+                    labels_dict = dict(labelset)
+                    labels_as_set = frozenset(labels_dict.items())
                     if (metric_name, labels_as_set) not in seen_labels:
-                        to_remove.append(labelset)
-                for labelset in to_remove:
-                    metric_obj.remove(**labelset)
+                        to_remove.append(labels_dict)
+                for label_dict in to_remove:
+                    metric_obj.remove(**label_dict)
 
         except Exception as e:
             print(f"Error scraping onload_stackdump lots: {e}")
