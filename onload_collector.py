@@ -5,7 +5,8 @@ import re
 import threading
 import argparse
 
-# Dynamic Prometheus metrics storage\metrics = {}
+# Dynamic Prometheus metrics storage
+enmetrics = {}
 
 # Regex to find important blocks and key-value pairs
 CI_NETIF_DUMP_HEADER_RE = re.compile(r'ci_netif_dump_to_logger', re.IGNORECASE)
@@ -13,6 +14,9 @@ STACK_INFO_RE = re.compile(r'stack=(\d+)', re.IGNORECASE)
 PID_INFO_RE = re.compile(r'Onload\s+([\d\.]+).*?pid=(\d+)', re.IGNORECASE)
 CI_NETIF_STATS_HEADER_RE = re.compile(r'ci_netif_stats:\s*(\d+)', re.IGNORECASE)
 CI_NETIF_STATS_LINE_RE = re.compile(r'\s*(\w+)\s*:\s*(\d+)', re.IGNORECASE)
+
+# The metrics dict holds Gauge objects by metric name
+enmetrics = {}
 
 
 def scrape_onload_stats(scrape_interval):
@@ -63,8 +67,8 @@ def scrape_onload_stats(scrape_interval):
                             key, val = m_line.groups()
                             metric_name = f"onload_netif_{key.lower()}"
                             # Initialize Gauge if needed
-                            if metric_name not in metrics:
-                                metrics[metric_name] = Gauge(
+                            if metric_name not in enmetrics:
+                                enmetrics[metric_name] = Gauge(
                                     metric_name,
                                     f"Onload netif stat {key}",
                                     ['stack_id', 'onload_version', 'pid']
@@ -76,19 +80,17 @@ def scrape_onload_stats(scrape_interval):
                                 'pid': current_pid
                             }
                             # Record seen labelset for cleanup
-                            labelset = tuple(labels[name] for name in metrics[metric_name]._labelnames)
                             labels_as_set = frozenset(labels.items())
                             seen_labels.add((metric_name, labels_as_set))
                             # Set metric value
-                            metrics[metric_name].labels(**labels).set(int(val))
+                            enmetrics[metric_name].labels(**labels).set(int(val))
 
             # Cleanup stale metrics
-            for metric_name, metric_obj in metrics.items():
+            for metric_name, metric_obj in enmetrics.items():
                 to_remove = []
                 for label_tuple in list(metric_obj._metrics.keys()):
                     # Reconstruct dict for this label tuple
-                    names = metric_obj._labelnames
-                    label_dict = dict(zip(names, label_tuple))
+                    label_dict = dict(zip(metric_obj._labelnames, label_tuple))
                     labels_as_set = frozenset(label_dict.items())
                     if (metric_name, labels_as_set) not in seen_labels:
                         to_remove.append(label_tuple)
