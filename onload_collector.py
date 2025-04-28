@@ -8,7 +8,10 @@ import argparse
 # Dynamic Prometheus metrics storage
 metrics = {}
 
-# Regex to find ci_netif_stats block and key-value pairs
+# Regex to find important blocks and key-value pairs
+CI_NETIF_DUMP_HEADER_RE = re.compile(r'ci_netif_dump_to_logger', re.IGNORECASE)
+STACK_INFO_RE = re.compile(r'stack=(\d+)', re.IGNORECASE)
+PID_INFO_RE = re.compile(r'Onload\s+([\d\.]+).*?pid\s+(\d+)', re.IGNORECASE)
 CI_NETIF_STATS_HEADER_RE = re.compile(r'ci_netif_stats:\s*(\d+)', re.IGNORECASE)
 CI_NETIF_STATS_LINE_RE = re.compile(r'\s*(\w+)\s*:\s*(\d+)', re.IGNORECASE)
 
@@ -19,25 +22,56 @@ def scrape_onload_stats(scrape_interval):
     """
     while True:
         try:
-            output = subprocess.check_output(['onload_stackdump', 'lots'], text=True)
+            output = subprocess.check_output(['onload_stackdump', 'lots'], universal_newlines=True)
+            inside_dump = False
             current_stack_id = None
+            current_onload_version = None
+            current_pid = None
+            ready_for_stats = False
 
             for line in output.splitlines():
-                header_match = CI_NETIF_STATS_HEADER_RE.search(line)
-                if header_match:
-                    current_stack_id = header_match.group(1)
+                if CI_NETIF_DUMP_HEADER_RE.search(line):
+                    inside_dump = True
                     continue
 
-                if current_stack_id:
-                    stat_match = CI_NETIF_STATS_LINE_RE.search(line)
-                    if stat_match:
-                        key, value = stat_match.groups()
-                        metric_name = f"onload_netif_{key}"
+                if inside_dump:
+                    stack_info = STACK_INFO_RE.search(line)
+                    if stack_info:
+                        current_stack_id = stack_info.group(1)
+                        continue
 
-                        if metric_name not in metrics:
-                            metrics[metric_name] = Gauge(metric_name, f"Onload netif stat {key}", ['stack_id'])
+                    pid_info = PID_INFO_RE.search(line)
+                    if pid_info:
+                        current_onload_version, current_pid = pid_info.groups()
+                        continue
 
-                        metrics[metric_name].labels(stack_id=current_stack_id).set(int(value))
+                    stats_header = CI_NETIF_STATS_HEADER_RE.search(line)
+                    if stats_header:
+                        stats_stack_id = stats_header.group(1)
+                        if stats_stack_id == current_stack_id:
+                            ready_for_stats = True
+                        else:
+                            ready_for_stats = False
+                        continue
+
+                    if ready_for_stats:
+                        stat_match = CI_NETIF_STATS_LINE_RE.search(line)
+                        if stat_match:
+                            key, value = stat_match.groups()
+                            metric_name = f"onload_netif_{key.lower()}"
+
+                            if metric_name not in metrics:
+                                metrics[metric_name] = Gauge(
+                                    metric_name,
+                                    f"Onload netif stat {key}",
+                                    ['stack_id', 'onload_version', 'pid']
+                                )
+
+                            metrics[metric_name].labels(
+                                stack_id=current_stack_id,
+                                onload_version=current_onload_version,
+                                pid=current_pid
+                            ).set(int(value))
 
         except Exception as e:
             print(f"Error scraping onload_stackdump lots: {e}")
