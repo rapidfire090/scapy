@@ -25,19 +25,28 @@ std::string generate_fix_message(int seq_num) {
 }
 
 int main(int argc, char* argv[]) {
-    if (argc != 3) {
-        std::cerr << "Usage: " << argv[0] << " <relay_ip> <relay_port>\n";
+    if (argc != 4) {
+        std::cerr << "Usage: " << argv[0] << " <relay_ip> <relay_port> <send_interval_usec>\n";
         return 1;
     }
 
     const char* server_ip = argv[1];
     int server_port = std::stoi(argv[2]);
+    int send_interval_usec = std::stoi(argv[3]);  // microseconds
 
     int sock = socket(AF_INET, SOCK_STREAM, 0);
+    if (sock < 0) {
+        perror("socket");
+        return 1;
+    }
+
     sockaddr_in server_addr {};
     server_addr.sin_family = AF_INET;
     server_addr.sin_port = htons(server_port);
-    inet_pton(AF_INET, server_ip, &server_addr.sin_addr);
+    if (inet_pton(AF_INET, server_ip, &server_addr.sin_addr) <= 0) {
+        perror("inet_pton");
+        return 1;
+    }
 
     if (connect(sock, (sockaddr*)&server_addr, sizeof(server_addr)) < 0) {
         perror("connect");
@@ -46,9 +55,13 @@ int main(int argc, char* argv[]) {
 
     for (int i = 1; ; ++i) {
         std::string fix = generate_fix_message(i);
-        send(sock, fix.c_str(), fix.size(), 0);
+        ssize_t sent = send(sock, fix.c_str(), fix.size(), 0);
+        if (sent <= 0) {
+            std::cerr << "Send error or connection closed\n";
+            break;
+        }
         std::cout << "Sent FIX message " << i << std::endl;
-        usleep(10000); // 10ms between messages
+        usleep(send_interval_usec);  // sleep for the specified interval
     }
 
     close(sock);
