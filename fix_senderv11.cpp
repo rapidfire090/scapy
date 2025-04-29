@@ -1,27 +1,50 @@
 #include <iostream>
 #include <sstream>
 #include <string>
+#include <vector>
 #include <unistd.h>
 #include <netinet/in.h>
 #include <arpa/inet.h>
 #include <cstring>
 
+// Generate correct FIX NewOrderSingle with real BodyLength and Checksum
 std::string generate_fix_message(int seq_num) {
+    const std::string soh = "\x01";
+
+    std::ostringstream body;
+    body << "35=D" << soh
+         << "34=" << seq_num << soh
+         << "49=SENDER" << soh
+         << "56=TARGET" << soh
+         << "11=ORD" << seq_num << soh
+         << "21=1" << soh
+         << "40=1" << soh
+         << "54=1" << soh
+         << "38=100" << soh
+         << "55=TESTSYM" << soh;
+
+    std::string body_str = body.str();
+
+    int body_length = body_str.size(); // BodyLength is size after 9=XXX| up to before 10=
+    
     std::ostringstream fix;
-    fix << "8=FIX.4.2\x01"
-        << "9=100\x01"
-        << "35=D\x01"
-        << "34=" << seq_num << "\x01"
-        << "49=SENDER\x01"
-        << "56=TARGET\x01"
-        << "11=ORD" << seq_num << "\x01"
-        << "21=1\x01"
-        << "40=1\x01"
-        << "54=1\x01"
-        << "38=100\x01"
-        << "55=TESTSYM\x01"
-        << "10=000\x01";
-    return fix.str();
+    fix << "8=FIX.4.2" << soh
+        << "9=" << body_length << soh
+        << body_str;
+
+    std::string fix_message = fix.str();
+
+    // Calculate checksum
+    int checksum = 0;
+    for (char c : fix_message) {
+        checksum += static_cast<unsigned char>(c);
+    }
+    checksum %= 256;
+
+    std::ostringstream full_fix;
+    full_fix << fix_message << "10=" << std::setfill('0') << std::setw(3) << checksum << soh;
+
+    return full_fix.str();
 }
 
 int main(int argc, char* argv[]) {
@@ -32,7 +55,7 @@ int main(int argc, char* argv[]) {
 
     const char* server_ip = argv[1];
     int server_port = std::stoi(argv[2]);
-    int send_interval_usec = std::stoi(argv[3]);  // microseconds
+    int send_interval_usec = std::stoi(argv[3]);
 
     int sock = socket(AF_INET, SOCK_STREAM, 0);
     if (sock < 0) {
@@ -61,7 +84,7 @@ int main(int argc, char* argv[]) {
             break;
         }
         std::cout << "Sent FIX message " << i << std::endl;
-        usleep(send_interval_usec);  // sleep for the specified interval
+        usleep(send_interval_usec);
     }
 
     close(sock);
