@@ -8,22 +8,14 @@
 struct OuchLoginRequest {
     char message_type;
     char username[6];
-    char password[10];
+    char password[20];
+    char requested_session[4];
+    char requested_sequence[20];
 };
 
 struct OuchAccepted {
     char message_type;
     char session_id[6];
-};
-
-struct OuchNewOrder {
-    char message_type;
-    char stock[8];
-    uint32_t price;
-    uint32_t quantity;
-    char buy_sell_indicator;
-    uint32_t time_in_force;
-    char client_order_id[20];
 };
 #pragma pack(pop)
 
@@ -58,12 +50,16 @@ int main(int argc, char* argv[]) {
         ack.message_type = 'A';
         memcpy(ack.session_id, "ABC123", 6);
         send(client_sock, &ack, sizeof(ack), 0);
-        std::cout << "Sent OUCH ACK\n";
+        std::cout << "Sent OUCH 5.0 ACK" << std::endl;
+    } else {
+        std::cerr << "Unexpected login message type!" << std::endl;
+        close(client_sock);
+        return 1;
     }
 
     char buffer[512];
     while (recv(client_sock, buffer, sizeof(buffer), 0) > 0) {
-        std::cout << "Received OUCH message.\n";
+        std::cout << "Received OUCH message." << std::endl;
     }
 
     close(client_sock);
