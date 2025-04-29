@@ -4,7 +4,6 @@
 #include <netinet/in.h>
 #include <arpa/inet.h>
 #include <unistd.h>
-#include <vector>
 
 // Profile Selector
 enum class Profile {
@@ -12,7 +11,20 @@ enum class Profile {
     FIX_TO_BINARY,
 };
 
-// Parse a very basic FIX message and extract ClOrdID (11), Side (54), Quantity (38), Symbol (55)
+// Structures
+struct BinaryLogin {
+    char msg_type;       // 'L'
+    char username[6];    // Username
+    char password[10];   // Password
+};
+
+struct BinaryOrder {
+    char msg_type;       // 'O'
+    char side;           // 'B' (buy) or 'S' (sell)
+    int32_t quantity;    // Quantity (network byte order)
+    char symbol[8];      // Symbol (padded)
+};
+
 struct FixOrder {
     std::string cl_ord_id;
     char side;
@@ -20,7 +32,6 @@ struct FixOrder {
     std::string symbol;
 };
 
-// Parse minimal FIX fields
 FixOrder parse_fix_new_order(const std::string& fix_msg) {
     FixOrder order;
     size_t start = 0;
@@ -28,15 +39,10 @@ FixOrder parse_fix_new_order(const std::string& fix_msg) {
         size_t end = fix_msg.find('\x01', start);
         std::string field = fix_msg.substr(start, end - start);
 
-        if (field.rfind("11=", 0) == 0) {
-            order.cl_ord_id = field.substr(3);
-        } else if (field.rfind("54=", 0) == 0) {
-            order.side = field[3];
-        } else if (field.rfind("38=", 0) == 0) {
-            order.quantity = std::stoi(field.substr(3));
-        } else if (field.rfind("55=", 0) == 0) {
-            order.symbol = field.substr(3);
-        }
+        if (field.rfind("11=", 0) == 0) order.cl_ord_id = field.substr(3);
+        else if (field.rfind("54=", 0) == 0) order.side = field[3];
+        else if (field.rfind("38=", 0) == 0) order.quantity = std::stoi(field.substr(3));
+        else if (field.rfind("55=", 0) == 0) order.symbol = field.substr(3);
 
         if (end == std::string::npos) break;
         start = end + 1;
@@ -44,25 +50,15 @@ FixOrder parse_fix_new_order(const std::string& fix_msg) {
     return order;
 }
 
-// Very simple binary OUCH-like message
-struct BinaryOrder {
-    char msg_type;     // e.g., 'O' for New Order
-    char side;         // 'B' or 'S'
-    int32_t quantity;  // Quantity
-    char symbol[8];    // Padded symbol
-};
-
-// Create binary message
 BinaryOrder convert_to_binary(const FixOrder& order) {
-    BinaryOrder b{};
+    BinaryOrder b {};
     b.msg_type = 'O';
-    b.side = (order.side == '1') ? 'B' : 'S'; // FIX Side: 1=Buy, 2=Sell
+    b.side = (order.side == '1') ? 'B' : 'S';
     b.quantity = htonl(order.quantity);
     std::strncpy(b.symbol, order.symbol.c_str(), sizeof(b.symbol));
     return b;
 }
 
-// Relay thread
 void handle_connection(int client_sock, const char* forward_ip, int forward_port, Profile profile) {
     int forward_sock = socket(AF_INET, SOCK_STREAM, 0);
     if (forward_sock < 0) {
@@ -83,9 +79,41 @@ void handle_connection(int client_sock, const char* forward_ip, int forward_port
         return;
     }
 
+    if (profile == Profile::FIX_TO_BINARY) {
+        // Send login message
+        BinaryLogin login {};
+        login.msg_type = 'L';
+        std::strncpy(login.username, "TEST", sizeof(login.username));
+        std::strncpy(login.password, "12345678", sizeof(login.password));
+        send(forward_sock, &login, sizeof(login), 0);
+
+        // Wait for ACK or NAK
+        char ack_buffer[7];
+        ssize_t ack_len = recv(forward_sock, ack_buffer, sizeof(ack_buffer), MSG_WAITALL);
+        if (ack_len < 1) {
+            std::cerr << "No response to login.\n";
+            close(client_sock);
+            close(forward_sock);
+            return;
+        }
+        if (ack_buffer[0] == 'N') {
+            std::cerr << "Login rejected by forward server.\n";
+            close(client_sock);
+            close(forward_sock);
+            return;
+        } else if (ack_buffer[0] == 'A') {
+            std::string session_id(ack_buffer + 1, 6);
+            std::cout << "Login successful. Session ID: [" << session_id << "]\n";
+        } else {
+            std::cerr << "Unexpected login response.\n";
+            close(client_sock);
+            close(forward_sock);
+            return;
+        }
+    }
+
     char buffer[4096];
     ssize_t len;
-
     while ((len = recv(client_sock, buffer, sizeof(buffer), 0)) > 0) {
         if (profile == Profile::RELAY) {
             send(forward_sock, buffer, len, 0);
@@ -109,11 +137,9 @@ int main(int argc, char* argv[]) {
 
     std::string profile_str = argv[1];
     Profile profile;
-    if (profile_str == "relay") {
-        profile = Profile::RELAY;
-    } else if (profile_str == "fix_to_binary") {
-        profile = Profile::FIX_TO_BINARY;
-    } else {
+    if (profile_str == "relay") profile = Profile::RELAY;
+    else if (profile_str == "fix_to_binary") profile = Profile::FIX_TO_BINARY;
+    else {
         std::cerr << "Unknown profile: " << profile_str << "\n";
         return 1;
     }
