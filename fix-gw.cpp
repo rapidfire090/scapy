@@ -8,31 +8,44 @@
 #include <unistd.h>
 
 #pragma pack(push, 1)
+
 struct OuchLoginRequest {
-    char message_type;          // 'U'
+    char message_type;              // 'U'
     char username[6];
     char password[20];
     char requested_session[4];
-    char requested_sequence[20];
+    char requested_sequence_number[20];
 };
 
 struct OuchAccepted {
-    char message_type;          // 'A'
+    char message_type;              // 'A'
     char session_id[6];
 };
 
 struct OuchNewOrder {
-    char message_type;
+    char message_type;                   // 'O'
+    char order_token[14];
+    char buy_sell_indicator;              // 'B' or 'S'
+    uint32_t shares;                      // Unsigned int (network byte order)
     char stock[8];
-    uint32_t price;
-    uint32_t quantity;
-    char buy_sell_indicator;
-    uint32_t time_in_force;
-    char client_order_id[20];
+    uint32_t price;                       // Unsigned int (price * 10000) (network byte order)
+    uint32_t time_in_force;               // Unsigned int (network byte order)
+    char firm[4];
+    char display;
+    char capacity;
+    char intermarket_sweep_eligibility;
+    uint32_t minimum_quantity;            // Unsigned int (network byte order)
+    char cross_type;
+    char customer_type;
+
+    OuchNewOrder() {
+        memset(this, 0, sizeof(*this));
+    }
 };
+
 #pragma pack(pop)
 
-// Helper to parse FIX fields
+// Parse a field from a FIX message
 std::string parse_fix_value(const std::string& fix_msg, const std::string& tag) {
     size_t pos = fix_msg.find(tag);
     if (pos == std::string::npos) return "";
@@ -54,14 +67,14 @@ void process_connection(int client_sock, const char* forward_ip, int forward_por
         return;
     }
 
-    // Send real OUCH 5.0 login
+    // Send true OUCH 5.0 login
     OuchLoginRequest login {};
     login.message_type = 'U';
     std::memcpy(login.username, "USER01", 6);
-    std::memcpy(login.password, "PASSWORD1234567890", 20);  // Fill up 20 bytes
-    std::memset(login.requested_session, ' ', 4);           // Blank requested session
-    std::memset(login.requested_sequence, '0', 1);          // "0" for sequence
-    std::memset(login.requested_sequence + 1, ' ', 19);     // Padding spaces
+    std::memcpy(login.password, "PASSWORD1234567890    ", 20); // pad to 20
+    std::memset(login.requested_session, ' ', 4);
+    std::memset(login.requested_sequence_number, ' ', 20);
+    login.requested_sequence_number[0] = '0';
 
     send(forward_sock, &login, sizeof(login), 0);
 
@@ -78,27 +91,39 @@ void process_connection(int client_sock, const char* forward_ip, int forward_por
 
     char buffer[4096];
     ssize_t len;
+    int order_counter = 1;
     while ((len = recv(client_sock, buffer, sizeof(buffer), 0)) > 0) {
         std::string fix(buffer, len);
 
         if (parse_fix_value(fix, "35=") == "D") {
-            OuchNewOrder order {};
+            OuchNewOrder order;
             order.message_type = 'O';
+
+            std::ostringstream token;
+            token << "ORD" << std::setw(10) << std::setfill('0') << order_counter++;
+            std::string token_str = token.str();
+            std::memcpy(order.order_token, token_str.c_str(), std::min(token_str.size(), sizeof(order.order_token)));
+
+            order.buy_sell_indicator = (parse_fix_value(fix, "54=") == "1") ? 'B' : 'S';
+            order.shares = htonl(std::stoi(parse_fix_value(fix, "38=")));
+
             std::memset(order.stock, ' ', sizeof(order.stock));
             std::string symbol = parse_fix_value(fix, "55=");
             std::memcpy(order.stock, symbol.c_str(), std::min(symbol.size(), sizeof(order.stock)));
 
-            order.price = htonl(1000000); // $100.0000
-            order.quantity = htonl(std::stoi(parse_fix_value(fix, "38=")));
-            order.buy_sell_indicator = (parse_fix_value(fix, "54=") == "1") ? 'B' : 'S';
-            order.time_in_force = htonl(3600); // e.g., 1 hour
+            order.price = htonl(1000000); // $100.00
+            order.time_in_force = htonl(3600); // 1 hour
 
-            std::memset(order.client_order_id, ' ', sizeof(order.client_order_id));
-            std::string clordid = parse_fix_value(fix, "11=");
-            std::memcpy(order.client_order_id, clordid.c_str(), std::min(clordid.size(), sizeof(order.client_order_id)));
+            std::memcpy(order.firm, "FIRM", 4);
+            order.display = 'Y';
+            order.capacity = 'A';
+            order.intermarket_sweep_eligibility = 'N';
+            order.minimum_quantity = htonl(0);
+            order.cross_type = 'N';
+            order.customer_type = 'R';
 
             send(forward_sock, &order, sizeof(order), 0);
-            std::cout << "Sent OUCH NewOrder from FIX" << std::endl;
+            std::cout << "Sent OUCH NewOrder mapped from FIX" << std::endl;
         }
     }
 
