@@ -5,18 +5,37 @@
 #include <unistd.h>
 
 #pragma pack(push, 1)
+
 struct OuchLoginRequest {
     char message_type;
     char username[6];
     char password[20];
     char requested_session[4];
-    char requested_sequence[20];
+    char requested_sequence_number[20];
 };
 
 struct OuchAccepted {
     char message_type;
     char session_id[6];
 };
+
+struct OuchNewOrder {
+    char message_type;
+    char order_token[14];
+    char buy_sell_indicator;
+    uint32_t shares;
+    char stock[8];
+    uint32_t price;
+    uint32_t time_in_force;
+    char firm[4];
+    char display;
+    char capacity;
+    char intermarket_sweep_eligibility;
+    uint32_t minimum_quantity;
+    char cross_type;
+    char customer_type;
+};
+
 #pragma pack(pop)
 
 int main(int argc, char* argv[]) {
@@ -57,9 +76,10 @@ int main(int argc, char* argv[]) {
         return 1;
     }
 
+    // Now receiving real orders
     char buffer[512];
     while (recv(client_sock, buffer, sizeof(buffer), 0) > 0) {
-        std::cout << "Received OUCH message." << std::endl;
+        std::cout << "Received OUCH message.\n";
     }
 
     close(client_sock);
