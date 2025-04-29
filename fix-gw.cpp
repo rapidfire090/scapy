@@ -2,24 +2,27 @@
 #include <sstream>
 #include <cstring>
 #include <iomanip>
+#include <thread>
 #include <netinet/in.h>
 #include <arpa/inet.h>
 #include <unistd.h>
 
 #pragma pack(push, 1)
 struct OuchLoginRequest {
-    char message_type;       // 'U'
+    char message_type;          // 'U'
     char username[6];
-    char password[10];
+    char password[20];
+    char requested_session[4];
+    char requested_sequence[20];
 };
 
 struct OuchAccepted {
-    char message_type;       // 'A'
+    char message_type;          // 'A'
     char session_id[6];
 };
 
 struct OuchNewOrder {
-    char message_type;       
+    char message_type;
     char stock[8];
     uint32_t price;
     uint32_t quantity;
@@ -29,6 +32,7 @@ struct OuchNewOrder {
 };
 #pragma pack(pop)
 
+// Helper to parse FIX fields
 std::string parse_fix_value(const std::string& fix_msg, const std::string& tag) {
     size_t pos = fix_msg.find(tag);
     if (pos == std::string::npos) return "";
@@ -50,11 +54,15 @@ void process_connection(int client_sock, const char* forward_ip, int forward_por
         return;
     }
 
-    // Send real OUCH login
+    // Send real OUCH 5.0 login
     OuchLoginRequest login {};
     login.message_type = 'U';
     std::memcpy(login.username, "USER01", 6);
-    std::memcpy(login.password, "PASSWORD12", 10);
+    std::memcpy(login.password, "PASSWORD1234567890", 20);  // Fill up 20 bytes
+    std::memset(login.requested_session, ' ', 4);           // Blank requested session
+    std::memset(login.requested_sequence, '0', 1);          // "0" for sequence
+    std::memset(login.requested_sequence + 1, ' ', 19);     // Padding spaces
+
     send(forward_sock, &login, sizeof(login), 0);
 
     // Wait for ACK
@@ -73,7 +81,6 @@ void process_connection(int client_sock, const char* forward_ip, int forward_por
     while ((len = recv(client_sock, buffer, sizeof(buffer), 0)) > 0) {
         std::string fix(buffer, len);
 
-        // Only process 35=D (NewOrderSingle)
         if (parse_fix_value(fix, "35=") == "D") {
             OuchNewOrder order {};
             order.message_type = 'O';
@@ -81,7 +88,7 @@ void process_connection(int client_sock, const char* forward_ip, int forward_por
             std::string symbol = parse_fix_value(fix, "55=");
             std::memcpy(order.stock, symbol.c_str(), std::min(symbol.size(), sizeof(order.stock)));
 
-            order.price = htonl(1000000); // $100.0000 = 1000000 (for demo)
+            order.price = htonl(1000000); // $100.0000
             order.quantity = htonl(std::stoi(parse_fix_value(fix, "38=")));
             order.buy_sell_indicator = (parse_fix_value(fix, "54=") == "1") ? 'B' : 'S';
             order.time_in_force = htonl(3600); // e.g., 1 hour
