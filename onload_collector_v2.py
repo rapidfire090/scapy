@@ -7,19 +7,31 @@ import argparse
 
 # Regex patterns
 DUMP_HEADER_RE = re.compile(r'^\s*ci_netif_dump_to_logger:\s*stack=(?P<stack_id>\d+)', re.IGNORECASE)
-ONLOAD_PID_RE   = re.compile(r'Onload\s+(?P<version>[\d\.]+).*?pid=(?P<pid>\d+)', re.IGNORECASE)
-SECTION_RE      = re.compile(r'^-+\s*(?P<header>\w+):\s*(?P<stack_id>\d+)\s*-+', re.IGNORECASE)
-METRIC_RE       = re.compile(r'^\s*(?P<key>\w+)\s*:\s*(?P<value>\d+)', re.IGNORECASE)
-TARGET_HEADER   = 'ci_netif_stats'
+ONLOAD_PID_RE = re.compile(r'Onload\s+(?P<version>[\d\.]+).*?pid=(?P<pid>\d+)', re.IGNORECASE)
+SECTION_RE = re.compile(r'^-+\s*(?P<header>\w+):\s*(?P<stack_id>\d+)\s*-+', re.IGNORECASE)
+METRIC_RE = re.compile(r'^\s*(?P<key>\w+)\s*:\s*(\d+)', re.IGNORECASE)
+TARGET_HEADER = 'ci_netif_stats'
 
 class OnloadCollector:
+    def __init__(self, timeout):
+        self.timeout = timeout
+
     def collect(self):
         try:
-            output = subprocess.check_output(['onload_stackdump', 'lots'], universal_newlines=True)
-        except Exception:
+            output = subprocess.check_output(
+                ['onload_stackdump', 'lots'], universal_newlines=True, timeout=self.timeout
+            )
+        except subprocess.TimeoutExpired:
+            print('Timeout: onload_stackdump hung')
+            return
+        except subprocess.CalledProcessError:
+            print('onload_stackdump failed with non-zero exit')
+            return
+        except Exception as e:
+            print(f"General error calling onload_stackdump: {e}")
             return
 
-        metrics_data = {}  # key -> list of (labels_dict, value)
+        metrics_data = {}
         current_stack = None
         current_version = None
         current_pid = None
@@ -51,33 +63,30 @@ class OnloadCollector:
             if in_section and current_stack and current_version and current_pid:
                 m4 = METRIC_RE.match(line)
                 if m4:
-                    key = m4.group('key').lower()
-                    val = int(m4.group('value'))
+                    key = m4.group(1).lower()
+                    val = int(m4.group(2))
                     metric_name = f"onload_{TARGET_HEADER}_{key}"
-                    labels = {
-                        'stack_id': current_stack,
-                        'onload_version': current_version,
-                        'pid': current_pid
-                    }
+                    labels = [current_stack, current_pid, current_version]
                     metrics_data.setdefault(metric_name, []).append((labels, val))
 
-        # Emit metrics
         for metric_name, samples in metrics_data.items():
             g = GaugeMetricFamily(
                 metric_name,
                 f"Onload {TARGET_HEADER} metric",
-                labels=['stack_id','onload_version','pid']
+                labels=['stack_id', 'pid', 'onload_version']
             )
             for labels, val in samples:
-                g.add_metric([labels['stack_id'], labels['onload_version'], labels['pid']], val)
+                g.add_metric(labels, val)
             yield g
 
 if __name__ == '__main__':
     parser = argparse.ArgumentParser(description='Onload ci_netif_stats exporter')
     parser.add_argument('--port', type=int, default=9100, help='HTTP port for Prometheus metrics')
+    parser.add_argument('--timeout', type=float, default=1.0, help='Timeout in seconds for onload_stackdump command')
     args = parser.parse_args()
 
-    REGISTRY.register(OnloadCollector())
+    REGISTRY.register(OnloadCollector(timeout=args.timeout))
     start_http_server(args.port)
+
     while True:
         time.sleep(60)
