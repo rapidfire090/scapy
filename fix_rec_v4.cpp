@@ -19,7 +19,7 @@ struct Message {
     size_t length;
 };
 
-// Preallocated lock-free queue and shutdown signal
+// Preallocated lock-free queue
 boost::lockfree::spsc_queue<Message, boost::lockfree::capacity<256>> queue;
 std::atomic<bool> recv_done = false;
 
@@ -49,7 +49,7 @@ void recv_thread(int client_sock, int rx_cpu) {
     recv_done = true;
 }
 
-// Sending thread: from queue to forward socket, drains queue after recv ends
+// Sending thread: persistent loop; keeps socket open indefinitely
 void send_thread(const char* forward_ip, int forward_port, int tx_cpu) {
     pin_thread_to_core(tx_cpu);
     int forward_sock = socket(AF_INET, SOCK_STREAM, 0);
@@ -70,7 +70,7 @@ void send_thread(const char* forward_ip, int forward_port, int tx_cpu) {
     }
 
     Message msg;
-    while (!recv_done || !queue.empty()) {
+    while (true) {
         if (queue.pop(msg)) {
             send(forward_sock, msg.data.data(), msg.length, 0);
         } else {
@@ -78,7 +78,7 @@ void send_thread(const char* forward_ip, int forward_port, int tx_cpu) {
         }
     }
 
-    close(forward_sock);
+    // never closes (persistent)
 }
 
 int main(int argc, char* argv[]) {
