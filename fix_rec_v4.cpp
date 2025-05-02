@@ -1,16 +1,10 @@
 #include <iostream>
 #include <thread>
-#include <vector>
 #include <array>
-#include <cstring>
 #include <atomic>
-#include <csignal>
-#include <optional>
 #include <netinet/in.h>
 #include <arpa/inet.h>
 #include <unistd.h>
-#include <sched.h>
-#include <pthread.h>
 #include <boost/lockfree/spsc_queue.hpp>
 
 // Fixed-size message struct with length tracking
@@ -21,20 +15,9 @@ struct Message {
 
 // Preallocated lock-free queue
 boost::lockfree::spsc_queue<Message, boost::lockfree::capacity<256>> queue;
-std::atomic<bool> recv_done = false;
-
-// Thread pinning
-void pin_thread_to_core(int core_id) {
-    if (core_id < 0) return;
-    cpu_set_t cpuset;
-    CPU_ZERO(&cpuset);
-    CPU_SET(core_id, &cpuset);
-    pthread_setaffinity_np(pthread_self(), sizeof(cpu_set_t), &cpuset);
-}
 
 // Receiving thread: from client socket into queue
-void recv_thread(int client_sock, int rx_cpu) {
-    pin_thread_to_core(rx_cpu);
+void recv_thread(int client_sock) {
     while (true) {
         Message msg;
         ssize_t len = recv(client_sock, msg.data.data(), msg.data.size(), 0);
@@ -46,12 +29,10 @@ void recv_thread(int client_sock, int rx_cpu) {
         }
     }
     close(client_sock);
-    recv_done = true;
 }
 
 // Sending thread: persistent loop; keeps socket open indefinitely
-void send_thread(const char* forward_ip, int forward_port, int tx_cpu) {
-    pin_thread_to_core(tx_cpu);
+void send_thread(const char* forward_ip, int forward_port) {
     int forward_sock = socket(AF_INET, SOCK_STREAM, 0);
     if (forward_sock < 0) {
         perror("socket (forward)");
@@ -83,7 +64,7 @@ void send_thread(const char* forward_ip, int forward_port, int tx_cpu) {
 
 int main(int argc, char* argv[]) {
     if (argc < 5) {
-        std::cerr << "Usage: " << argv[0] << " <listen_ip> <listen_port> <forward_ip> <forward_port> [--rx-cpu N] [--tx-cpu M]\n";
+        std::cerr << "Usage: " << argv[0] << " <listen_ip> <listen_port> <forward_ip> <forward_port>\n";
         return 1;
     }
 
@@ -91,12 +72,6 @@ int main(int argc, char* argv[]) {
     int listen_port = std::stoi(argv[2]);
     const char* forward_ip = argv[3];
     int forward_port = std::stoi(argv[4]);
-
-    int rx_cpu = -1, tx_cpu = -1;
-    for (int i = 5; i + 1 < argc; i += 2) {
-        if (std::strcmp(argv[i], "--rx-cpu") == 0) rx_cpu = std::stoi(argv[i + 1]);
-        else if (std::strcmp(argv[i], "--tx-cpu") == 0) tx_cpu = std::stoi(argv[i + 1]);
-    }
 
     int listen_sock = socket(AF_INET, SOCK_STREAM, 0);
     if (listen_sock < 0) {
@@ -110,10 +85,7 @@ int main(int argc, char* argv[]) {
     sockaddr_in listen_addr{};
     listen_addr.sin_family = AF_INET;
     listen_addr.sin_port = htons(listen_port);
-    if (inet_pton(AF_INET, listen_ip, &listen_addr.sin_addr) <= 0) {
-        std::cerr << "Invalid listen IP: " << listen_ip << "\n";
-        return 1;
-    }
+    inet_pton(AF_INET, listen_ip, &listen_addr.sin_addr);
 
     if (bind(listen_sock, (sockaddr*)&listen_addr, sizeof(listen_addr)) < 0) {
         perror("bind");
@@ -133,9 +105,8 @@ int main(int argc, char* argv[]) {
         socklen_t addrlen = sizeof(client_addr);
         int client_sock = accept(listen_sock, (sockaddr*)&client_addr, &addrlen);
         if (client_sock >= 0) {
-            recv_done = false;
-            std::thread(recv_thread, client_sock, rx_cpu).detach();
-            std::thread(send_thread, forward_ip, forward_port, tx_cpu).detach();
+            std::thread(recv_thread, client_sock).detach();
+            std::thread(send_thread, forward_ip, forward_port).detach();
         }
     }
 
