@@ -19,8 +19,9 @@ struct Message {
     size_t length;
 };
 
-// Preallocated lock-free queue
+// Preallocated lock-free queue and shutdown signal
 boost::lockfree::spsc_queue<Message, boost::lockfree::capacity<256>> queue;
+std::atomic<bool> recv_done = false;
 
 // Thread pinning
 void pin_thread_to_core(int core_id) {
@@ -40,14 +41,15 @@ void recv_thread(int client_sock, int rx_cpu) {
         if (len <= 0) break;
 
         msg.length = static_cast<size_t>(len);
-        if (!queue.push(msg)) {
-            std::cerr << "Queue overflow. Dropping message.\n";
+        while (!queue.push(msg)) {
+            std::this_thread::yield(); // wait until space is available
         }
     }
     close(client_sock);
+    recv_done = true;
 }
 
-// Sending thread: from queue to forward socket
+// Sending thread: from queue to forward socket, drains queue after recv ends
 void send_thread(const char* forward_ip, int forward_port, int tx_cpu) {
     pin_thread_to_core(tx_cpu);
     int forward_sock = socket(AF_INET, SOCK_STREAM, 0);
@@ -68,8 +70,12 @@ void send_thread(const char* forward_ip, int forward_port, int tx_cpu) {
     }
 
     Message msg;
-    while (queue.pop(msg)) {
-        send(forward_sock, msg.data.data(), msg.length, 0);
+    while (!recv_done || !queue.empty()) {
+        if (queue.pop(msg)) {
+            send(forward_sock, msg.data.data(), msg.length, 0);
+        } else {
+            std::this_thread::yield();
+        }
     }
 
     close(forward_sock);
@@ -127,6 +133,7 @@ int main(int argc, char* argv[]) {
         socklen_t addrlen = sizeof(client_addr);
         int client_sock = accept(listen_sock, (sockaddr*)&client_addr, &addrlen);
         if (client_sock >= 0) {
+            recv_done = false;
             std::thread(recv_thread, client_sock, rx_cpu).detach();
             std::thread(send_thread, forward_ip, forward_port, tx_cpu).detach();
         }
