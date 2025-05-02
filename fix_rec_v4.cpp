@@ -13,8 +13,13 @@
 #include <pthread.h>
 #include <boost/lockfree/spsc_queue.hpp>
 
-// Preallocated lock-free queue type
-using Message = std::array<char, 1024>;
+// Fixed-size message struct with length tracking
+struct Message {
+    std::array<char, 1024> data;
+    size_t length;
+};
+
+// Preallocated lock-free queue
 boost::lockfree::spsc_queue<Message, boost::lockfree::capacity<256>> queue;
 
 // Thread pinning
@@ -31,9 +36,10 @@ void recv_thread(int client_sock, int rx_cpu) {
     pin_thread_to_core(rx_cpu);
     while (true) {
         Message msg;
-        ssize_t len = recv(client_sock, msg.data(), msg.size(), 0);
+        ssize_t len = recv(client_sock, msg.data.data(), msg.data.size(), 0);
         if (len <= 0) break;
 
+        msg.length = static_cast<size_t>(len);
         if (!queue.push(msg)) {
             std::cerr << "Queue overflow. Dropping message.\n";
         }
@@ -63,7 +69,7 @@ void send_thread(const char* forward_ip, int forward_port, int tx_cpu) {
 
     Message msg;
     while (queue.pop(msg)) {
-        send(forward_sock, msg.data(), msg.size(), 0);
+        send(forward_sock, msg.data.data(), msg.length, 0);
     }
 
     close(forward_sock);
