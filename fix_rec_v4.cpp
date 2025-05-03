@@ -1,41 +1,49 @@
 #include <iostream>
 #include <thread>
 #include <array>
+#include <cstring>
 #include <atomic>
 #include <netinet/in.h>
 #include <arpa/inet.h>
 #include <unistd.h>
 #include <boost/lockfree/spsc_queue.hpp>
 
-// Fixed-size message struct with length tracking
 struct Message {
     std::array<char, 1024> data;
     size_t length;
 };
 
-// Preallocated lock-free queue
 boost::lockfree::spsc_queue<Message, boost::lockfree::capacity<256>> queue;
 
-// Receiving thread: from client socket into queue
 void recv_thread(int client_sock) {
+    std::cout << "[recv] Thread started for client socket " << client_sock << std::endl;
     while (true) {
         Message msg;
         ssize_t len = recv(client_sock, msg.data.data(), msg.data.size(), 0);
-        if (len <= 0) break;
+        if (len <= 0) {
+            if (len == 0)
+                std::cout << "[recv] Client closed connection
+";
+            else
+                perror("[recv] Error reading");
+            break;
+        }
 
         msg.length = static_cast<size_t>(len);
         while (!queue.push(msg)) {
-            std::this_thread::yield(); // wait until space is available
+            std::this_thread::yield();
         }
     }
     close(client_sock);
+    std::cout << "[recv] Closed client socket " << client_sock << std::endl;
 }
 
-// Sending thread: persistent loop; keeps socket open indefinitely
 void send_thread(const char* forward_ip, int forward_port) {
+    std::cout << "[send] Thread connecting to forward target " << forward_ip << ":" << forward_port << std::endl;
+
     int forward_sock = socket(AF_INET, SOCK_STREAM, 0);
     if (forward_sock < 0) {
-        perror("socket (forward)");
+        perror("[send] socket");
         return;
     }
 
@@ -45,26 +53,36 @@ void send_thread(const char* forward_ip, int forward_port) {
     inet_pton(AF_INET, forward_ip, &forward_addr.sin_addr);
 
     if (connect(forward_sock, (sockaddr*)&forward_addr, sizeof(forward_addr)) < 0) {
-        perror("connect (forward)");
+        perror("[send] connect");
         close(forward_sock);
         return;
     }
 
+    std::cout << "[send] Connected to forward target
+";
+
     Message msg;
     while (true) {
         if (queue.pop(msg)) {
-            send(forward_sock, msg.data.data(), msg.length, 0);
+            ssize_t sent = send(forward_sock, msg.data.data(), msg.length, 0);
+            if (sent < 0) {
+                perror("[send] Error sending data");
+                break;
+            }
         } else {
             std::this_thread::yield();
         }
     }
 
-    // never closes (persistent)
+    close(forward_sock);
+    std::cout << "[send] Forward socket closed
+";
 }
 
 int main(int argc, char* argv[]) {
     if (argc < 5) {
-        std::cerr << "Usage: " << argv[0] << " <listen_ip> <listen_port> <forward_ip> <forward_port>\n";
+        std::cerr << "Usage: " << argv[0] << " <listen_ip> <listen_port> <forward_ip> <forward_port>
+";
         return 1;
     }
 
@@ -75,7 +93,7 @@ int main(int argc, char* argv[]) {
 
     int listen_sock = socket(AF_INET, SOCK_STREAM, 0);
     if (listen_sock < 0) {
-        perror("socket (listen)");
+        perror("[main] socket");
         return 1;
     }
 
@@ -88,16 +106,16 @@ int main(int argc, char* argv[]) {
     inet_pton(AF_INET, listen_ip, &listen_addr.sin_addr);
 
     if (bind(listen_sock, (sockaddr*)&listen_addr, sizeof(listen_addr)) < 0) {
-        perror("bind");
+        perror("[main] bind");
         return 1;
     }
 
     if (listen(listen_sock, 10) < 0) {
-        perror("listen");
+        perror("[main] listen");
         return 1;
     }
 
-    std::cout << "Listening on " << listen_ip << ":" << listen_port
+    std::cout << "[main] Listening on " << listen_ip << ":" << listen_port
               << ", forwarding to " << forward_ip << ":" << forward_port << std::endl;
 
     while (true) {
@@ -105,11 +123,16 @@ int main(int argc, char* argv[]) {
         socklen_t addrlen = sizeof(client_addr);
         int client_sock = accept(listen_sock, (sockaddr*)&client_addr, &addrlen);
         if (client_sock >= 0) {
+            std::cout << "[main] Accepted client connection: socket " << client_sock << std::endl;
             std::thread(recv_thread, client_sock).detach();
             std::thread(send_thread, forward_ip, forward_port).detach();
+        } else {
+            perror("[main] accept");
         }
     }
 
     close(listen_sock);
+    std::cout << "[main] Closed listening socket
+";
     return 0;
 }
