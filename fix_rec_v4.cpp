@@ -22,8 +22,7 @@ void recv_thread(int client_sock) {
         ssize_t len = recv(client_sock, msg.data.data(), msg.data.size(), 0);
         if (len <= 0) {
             if (len == 0)
-                std::cout << "[recv] Client closed connection
-";
+                std::cout << "[recv] Client closed connection" << std::endl;
             else
                 perror("[recv] Error reading");
             break;
@@ -58,8 +57,7 @@ void send_thread(const char* forward_ip, int forward_port) {
         return;
     }
 
-    std::cout << "[send] Connected to forward target
-";
+    std::cout << "[send] Connected to forward target" << std::endl;
 
     Message msg;
     while (true) {
@@ -75,14 +73,12 @@ void send_thread(const char* forward_ip, int forward_port) {
     }
 
     close(forward_sock);
-    std::cout << "[send] Forward socket closed
-";
+    std::cout << "[send] Forward socket closed" << std::endl;
 }
 
 int main(int argc, char* argv[]) {
     if (argc < 5) {
-        std::cerr << "Usage: " << argv[0] << " <listen_ip> <listen_port> <forward_ip> <forward_port>
-";
+        std::cerr << "Usage: " << argv[0] << " <listen_ip> <listen_port> <forward_ip> <forward_port>" << std::endl;
         return 1;
     }
 
@@ -132,7 +128,6 @@ int main(int argc, char* argv[]) {
     }
 
     close(listen_sock);
-    std::cout << "[main] Closed listening socket
-";
+    std::cout << "[main] Closed listening socket" << std::endl;
     return 0;
 }
