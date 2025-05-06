@@ -1,76 +1,60 @@
 #include <iostream>
-#include <sstream>
-#include <iomanip>
-#include <string>
-#include <unistd.h>
-#include <netinet/in.h>
-#include <arpa/inet.h>
+#include <thread>
+#include <chrono>
 #include <cstring>
-
-std::string generate_fix_message(int seq_num) {
-    const std::string soh = "\x01";
-
-    std::ostringstream body;
-    body << "35=D" << soh
-         << "34=" << seq_num << soh
-         << "49=SENDER" << soh
-         << "56=TARGET" << soh
-         << "11=ORD" << seq_num << soh
-         << "21=1" << soh
-         << "40=1" << soh
-         << "54=1" << soh
-         << "38=100" << soh
-         << "55=TESTSYM" << soh;
-
-    std::string body_str = body.str();
-    int body_length = body_str.size();
-
-    std::ostringstream fix;
-    fix << "8=FIX.4.2" << soh
-        << "9=" << body_length << soh
-        << body_str;
-
-    std::string fix_message = fix.str();
-
-    // Calculate checksum
-    int checksum = 0;
-    for (char c : fix_message) checksum += static_cast<unsigned char>(c);
-    checksum %= 256;
-
-    std::ostringstream full_fix;
-    full_fix << fix_message << "10=" << std::setfill('0') << std::setw(3) << checksum << soh;
-
-    return full_fix.str();
-}
+#include <netinet/in.h>
+#include <netinet/tcp.h>  // for TCP_NODELAY
+#include <arpa/inet.h>
+#include <unistd.h>
 
 int main(int argc, char* argv[]) {
-    if (argc != 4) {
-        std::cerr << "Usage: " << argv[0] << " <relay_ip> <relay_port> <send_interval_usec>\n";
+    if (argc < 4) {
+        std::cerr << "Usage: " << argv[0] << " <dest_ip> <dest_port> <num_messages>\n";
         return 1;
     }
 
-    const char* server_ip = argv[1];
-    int server_port = std::stoi(argv[2]);
-    int send_interval_usec = std::stoi(argv[3]);
+    const char* dest_ip = argv[1];
+    int dest_port = std::stoi(argv[2]);
+    int num_messages = std::stoi(argv[3]);
 
     int sock = socket(AF_INET, SOCK_STREAM, 0);
-    sockaddr_in server_addr {};
-    server_addr.sin_family = AF_INET;
-    server_addr.sin_port = htons(server_port);
-    inet_pton(AF_INET, server_ip, &server_addr.sin_addr);
-
-    if (connect(sock, (sockaddr*)&server_addr, sizeof(server_addr)) < 0) {
-        perror("connect");
+    if (sock < 0) {
+        perror("socket");
         return 1;
     }
 
-    for (int i = 1; ; ++i) {
-        std::string fix = generate_fix_message(i);
-        send(sock, fix.c_str(), fix.size(), 0);
-        std::cout << "Sent FIX message " << i << std::endl;
-        usleep(send_interval_usec);
+    // Disable Nagle's algorithm
+    int flag = 1;
+    if (setsockopt(sock, IPPROTO_TCP, TCP_NODELAY, (char*)&flag, sizeof(int)) < 0) {
+        perror("setsockopt TCP_NODELAY");
+    } else {
+        std::cout << "[sender] TCP_NODELAY enabled\n";
+    }
+
+    sockaddr_in dest_addr{};
+    dest_addr.sin_family = AF_INET;
+    dest_addr.sin_port = htons(dest_port);
+    inet_pton(AF_INET, dest_ip, &dest_addr.sin_addr);
+
+    if (connect(sock, (sockaddr*)&dest_addr, sizeof(dest_addr)) < 0) {
+        perror("connect");
+        close(sock);
+        return 1;
+    }
+
+    std::cout << "[sender] Connected to " << dest_ip << ":" << dest_port << "\n";
+
+    for (int i = 0; i < num_messages; ++i) {
+        std::string msg = "FIX" + std::to_string(i) + "|55=TEST|10=000|\n";
+        ssize_t sent = send(sock, msg.c_str(), msg.size(), 0);
+        if (sent < 0) {
+            perror("send");
+            break;
+        }
+        std::this_thread::sleep_for(std::chrono::milliseconds(1)); // optional pacing
     }
 
     close(sock);
+    std::cout << "[sender] Finished\n";
     return 0;
 }
