@@ -13,21 +13,18 @@
 struct Message {
     std::array<char, 1024> data;
     size_t length;
-    std::chrono::high_resolution_clock::time_point timestamp;
-};
+    std::chrono::high_resolution_clock::time_point timestamp;};
 
 boost::lockfree::spsc_queue<Message, boost::lockfree::capacity<256>> queue;
 
 void recv_thread(int client_sock) {
-    std::cout << "[recv] Thread started
-";
+    std::cout << "[recv] Thread started";
     while (true) {
         Message msg;
         ssize_t len = recv(client_sock, msg.data.data(), msg.data.size(), 0);
         if (len <= 0) {
             if (len == 0)
-                std::cout << "[recv] Client closed connection
-";
+                std::cout << "[recv] Client closed connection";
             else
                 perror("[recv] recv error");
             break;
@@ -41,8 +38,7 @@ void recv_thread(int client_sock) {
         }
     }
     close(client_sock);
-    std::cout << "[recv] Closed client socket
-";
+    std::cout << "[recv] Closed client socket";
 }
 
 void send_thread(const char* forward_ip, int forward_port) {
@@ -68,8 +64,7 @@ void send_thread(const char* forward_ip, int forward_port) {
         return;
     }
 
-    std::cout << "[send] Connected
-";
+    std::cout << "[send] Connected";
 
     Message msg;
     while (true) {
@@ -80,8 +75,7 @@ void send_thread(const char* forward_ip, int forward_port) {
 
         auto now = std::chrono::high_resolution_clock::now();
         auto latency_us = std::chrono::duration_cast<std::chrono::microseconds>(now - msg.timestamp).count();
-        std::cout << "[send] latency: " << latency_us << " us
-";
+        std::cout << "[send] latency: " << latency_us << " us";
 
         ssize_t sent = send(forward_sock, msg.data.data(), msg.length, 0);
         if (sent < 0) {
@@ -91,14 +85,12 @@ void send_thread(const char* forward_ip, int forward_port) {
     }
 
     close(forward_sock);
-    std::cout << "[send] Forward socket closed
-";
+    std::cout << "[send] Forward socket closed";
 }
 
 int main(int argc, char* argv[]) {
     if (argc < 7) {
-        std::cerr << "Usage: " << argv[0] << " <listen_ip> <listen_port> <forward_ip> <forward_port> <rx_cpu> <tx_cpu>
-";
+        std::cerr << "Usage: " << argv[0] << " <listen_ip> <listen_port> <forward_ip> <forward_port> <rx_cpu> <tx_cpu>";
         return 1;
     }
 
@@ -140,8 +132,7 @@ int main(int argc, char* argv[]) {
         socklen_t addrlen = sizeof(client_addr);
         int client_sock = accept(listen_sock, (sockaddr*)&client_addr, &addrlen);
         if (client_sock >= 0) {
-            std::cout << "[main] Accepted connection
-";
+            std::cout << "[main] Accepted connection";
 
             std::thread rx(recv_thread, client_sock);
             cpu_set_t set_rx;
