@@ -5,7 +5,7 @@
 #include <atomic>
 #include <chrono>
 #include <netinet/in.h>
-#include <netinet/tcp.h>
+#include <netinet/tcp.h>  // Added for TCP_NODELAY
 #include <arpa/inet.h>
 #include <unistd.h>
 #include <pthread.h>
@@ -19,6 +19,15 @@ struct Message {
 
 boost::lockfree::spsc_queue<Message, boost::lockfree::capacity<256>> queue;
 std::atomic<bool> enable_latency{ false };
+
+std::string extract_fix_tag11(const char* data, size_t len) {
+    std::string msg(data, len);
+    size_t pos = msg.find("11=");
+    if (pos == std::string::npos) return "";
+    size_t end = msg.find('\x01', pos);
+    if (end == std::string::npos) return msg.substr(pos + 3);
+    return msg.substr(pos + 3, end - pos - 3);
+}
 
 void recv_thread(int client_sock) {
     std::cout << "[recv] Thread started" << std::endl;
@@ -36,8 +45,6 @@ void recv_thread(int client_sock) {
         msg.length = static_cast<size_t>(len);
         if (enable_latency) {
             msg.timestamp = std::chrono::high_resolution_clock::now();
-            auto ts_ns = std::chrono::duration_cast<std::chrono::nanoseconds>(msg.timestamp.time_since_epoch()).count();
-            std::cout << "[recv] timestamp: " << ts_ns << " ns, length: " << msg.length << std::endl;
         }
 
         int spin = 0;
@@ -59,7 +66,7 @@ void send_thread(const char* forward_ip, int forward_port) {
     }
 
     int flag = 1;
-    setsockopt(forward_sock, IPPROTO_TCP, TCP_NODELAY, &flag, sizeof(flag)); // disable Nagle
+    setsockopt(forward_sock, IPPROTO_TCP, TCP_NODELAY, &flag, sizeof(flag));
 
     sockaddr_in forward_addr{};
     forward_addr.sin_family = AF_INET;
@@ -85,7 +92,10 @@ void send_thread(const char* forward_ip, int forward_port) {
             auto now = std::chrono::high_resolution_clock::now();
             auto now_ns = std::chrono::duration_cast<std::chrono::nanoseconds>(now.time_since_epoch()).count();
             auto latency_ns = std::chrono::duration_cast<std::chrono::nanoseconds>(now - msg.timestamp).count();
-            std::cout << "[send] now: " << now_ns << " ns, latency: " << latency_ns << " ns" << std::endl;
+            std::string clordid = extract_fix_tag11(msg.data.data(), msg.length);
+            std::cout << "[send] now: " << now_ns
+                << " ns, latency: " << latency_ns
+                << " ns, tag11: " << clordid << std::endl;
         }
 
         ssize_t sent = send(forward_sock, msg.data.data(), msg.length, 0);
