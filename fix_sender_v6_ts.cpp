@@ -32,9 +32,13 @@ void recv_thread(int client_sock) {
                 perror("[recv] recv error");
             break;
         }
+
         msg.length = static_cast<size_t>(len);
-        if (enable_latency)
+        if (enable_latency) {
             msg.timestamp = std::chrono::high_resolution_clock::now();
+            auto ts_ns = std::chrono::duration_cast<std::chrono::nanoseconds>(msg.timestamp.time_since_epoch()).count();
+            std::cout << "[recv] timestamp: " << ts_ns << " ns, length: " << msg.length << std::endl;
+        }
 
         int spin = 0;
         while (!queue.push(msg)) {
@@ -79,8 +83,9 @@ void send_thread(const char* forward_ip, int forward_port) {
 
         if (enable_latency) {
             auto now = std::chrono::high_resolution_clock::now();
-            auto latency_us = std::chrono::duration_cast<std::chrono::microseconds>(now - msg.timestamp).count();
-            std::cout << "[send] latency: " << latency_us << " us" << std::endl;
+            auto now_ns = std::chrono::duration_cast<std::chrono::nanoseconds>(now.time_since_epoch()).count();
+            auto latency_ns = std::chrono::duration_cast<std::chrono::nanoseconds>(now - msg.timestamp).count();
+            std::cout << "[send] now: " << now_ns << " ns, latency: " << latency_ns << " ns" << std::endl;
         }
 
         ssize_t sent = send(forward_sock, msg.data.data(), msg.length, 0);
