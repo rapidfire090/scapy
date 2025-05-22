@@ -11,6 +11,8 @@
 #include <arpa/inet.h>
 #include <unistd.h>
 #include <pthread.h>
+#include <sched.h>
+#include <sys/resource.h>
 
 // ---------------------- Message & LogEntry ----------------------
 
@@ -61,6 +63,7 @@ SPSCQueue<LogEntry, 4096> log_queue;
 
 std::atomic<bool> enable_latency{false};
 std::string log_file_path;
+int log_flush_interval_ms = 50;
 
 // ---------------------- Helpers ----------------------
 
@@ -75,7 +78,12 @@ std::string extract_fix_tag11(const char* data, size_t len) {
 
 // ---------------------- Logging Thread ----------------------
 
-void log_writer_thread(const std::string& file_path) {
+void log_writer_thread(const std::string& file_path, int flush_interval_ms) {
+    // Demote to normal scheduling
+    sched_param param{};
+    param.sched_priority = 0;
+    pthread_setschedparam(pthread_self(), SCHED_OTHER, &param);
+
     std::ofstream out(file_path, std::ios::out | std::ios::app);
     if (!out) {
         std::cerr << "Failed to open log file: " << file_path << std::endl;
@@ -83,7 +91,7 @@ void log_writer_thread(const std::string& file_path) {
     }
 
     while (true) {
-        std::this_thread::sleep_for(std::chrono::milliseconds(50));
+        std::this_thread::sleep_for(std::chrono::milliseconds(flush_interval_ms));
         LogEntry entry;
         while (log_queue.pop(entry)) {
             out << entry.now_ns << "," << entry.latency_ns << "," << entry.clordid.data() << "\n";
@@ -184,8 +192,8 @@ void send_thread(const char* forward_ip, int forward_port) {
 int main(int argc, char* argv[]) {
     if (argc < 7) {
         std::cerr << "Usage: " << argv[0]
-                  << " <listen_ip> <listen_port> <forward_ip> <forward_port> <rx_cpu> <tx_cpu> [--measure-latency <log_file>]"
-                  << std::endl;
+                  << " <listen_ip> <listen_port> <forward_ip> <forward_port> <rx_cpu> <tx_cpu> "
+                  << "[--measure-latency <log_file> <flush_interval_ms>]" << std::endl;
         return 1;
     }
 
@@ -196,13 +204,15 @@ int main(int argc, char* argv[]) {
     int rx_cpu = std::stoi(argv[5]);
     int tx_cpu = std::stoi(argv[6]);
 
-    if (argc >= 9 && std::string(argv[7]) == "--measure-latency") {
+    if (argc >= 10 && std::string(argv[7]) == "--measure-latency") {
         enable_latency = true;
         log_file_path = argv[8];
-        std::thread logger(log_writer_thread, log_file_path);
+        log_flush_interval_ms = std::stoi(argv[9]);
+
+        std::thread logger(log_writer_thread, log_file_path, log_flush_interval_ms);
         logger.detach();
     } else if (argc >= 8 && std::string(argv[7]) == "--measure-latency") {
-        std::cerr << "Missing log file path after --measure-latency" << std::endl;
+        std::cerr << "Missing log file path and flush interval after --measure-latency" << std::endl;
         return 1;
     }
 
