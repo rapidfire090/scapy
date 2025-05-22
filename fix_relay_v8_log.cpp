@@ -155,8 +155,12 @@ void send_thread(const char* forward_ip, int forward_port) {
 
         if (enable_latency) {
             auto now = std::chrono::high_resolution_clock::now();
-            auto now_ns = std::chrono::duration_cast<std::chrono::nanoseconds>(now.time_since_epoch()).count();
-            auto latency_ns = std::chrono::duration_cast<std::chrono::nanoseconds>(now - msg.timestamp).count();
+            auto now_ns = static_cast<uint64_t>(
+                std::chrono::duration_cast<std::chrono::nanoseconds>(now.time_since_epoch()).count()
+            );
+            auto latency_ns = static_cast<uint64_t>(
+                std::chrono::duration_cast<std::chrono::nanoseconds>(now - msg.timestamp).count()
+            );
             std::string clordid = extract_fix_tag11(msg.data.data(), msg.length);
 
             LogEntry entry{now_ns, latency_ns};
