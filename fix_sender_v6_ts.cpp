@@ -1,15 +1,20 @@
 #include <iostream>
 #include <thread>
 #include <array>
+#include <vector>
 #include <cstring>
 #include <atomic>
 #include <chrono>
+#include <fstream>
 #include <netinet/in.h>
-#include <netinet/tcp.h>  // Added for TCP_NODELAY
+#include <netinet/tcp.h>
 #include <arpa/inet.h>
 #include <unistd.h>
 #include <pthread.h>
-#include <boost/lockfree/spsc_queue.hpp>
+#include <sched.h>
+#include <sys/resource.h>
+
+// ---------------------- Message & LogEntry ----------------------
 
 struct Message {
     std::array<char, 1024> data;
@@ -17,8 +22,50 @@ struct Message {
     std::chrono::high_resolution_clock::time_point timestamp;
 };
 
-boost::lockfree::spsc_queue<Message, boost::lockfree::capacity<256>> queue;
-std::atomic<bool> enable_latency{ false };
+struct LogEntry {
+    uint64_t now_ns;
+    uint64_t latency_ns;
+    std::array<char, 32> clordid;
+};
+
+// ---------------------- Lock-Free SPSC Queue ----------------------
+
+template <typename T, size_t Capacity>
+class SPSCQueue {
+private:
+    std::array<T, Capacity> buffer;
+    std::atomic<size_t> head{0};
+    std::atomic<size_t> tail{0};
+
+public:
+    bool push(const T& item) {
+        size_t h = head.load(std::memory_order_relaxed);
+        size_t next = (h + 1) % Capacity;
+        if (next == tail.load(std::memory_order_acquire)) return false; // full
+        buffer[h] = item;
+        head.store(next, std::memory_order_release);
+        return true;
+    }
+
+    bool pop(T& item) {
+        size_t t = tail.load(std::memory_order_relaxed);
+        if (t == head.load(std::memory_order_acquire)) return false; // empty
+        item = buffer[t];
+        tail.store((t + 1) % Capacity, std::memory_order_release);
+        return true;
+    }
+};
+
+// ---------------------- Globals ----------------------
+
+SPSCQueue<Message, 256> queue;
+SPSCQueue<LogEntry, 4096> log_queue;
+
+std::atomic<bool> enable_latency{false};
+std::string log_file_path;
+int log_flush_interval_ms = 50;
+
+// ---------------------- Helpers ----------------------
 
 std::string extract_fix_tag11(const char* data, size_t len) {
     std::string msg(data, len);
@@ -28,6 +75,32 @@ std::string extract_fix_tag11(const char* data, size_t len) {
     if (end == std::string::npos) return msg.substr(pos + 3);
     return msg.substr(pos + 3, end - pos - 3);
 }
+
+// ---------------------- Logging Thread ----------------------
+
+void log_writer_thread(const std::string& file_path, int flush_interval_ms) {
+    // Demote to normal scheduling
+    sched_param param{};
+    param.sched_priority = 0;
+    pthread_setschedparam(pthread_self(), SCHED_OTHER, &param);
+
+    std::ofstream out(file_path, std::ios::out | std::ios::app);
+    if (!out) {
+        std::cerr << "Failed to open log file: " << file_path << std::endl;
+        return;
+    }
+
+    while (true) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(flush_interval_ms));
+        LogEntry entry;
+        while (log_queue.pop(entry)) {
+            out << entry.now_ns << "," << entry.latency_ns << "," << entry.clordid.data() << "\n";
+        }
+        out.flush();
+    }
+}
+
+// ---------------------- Threads ----------------------
 
 void recv_thread(int client_sock) {
     std::cout << "[recv] Thread started" << std::endl;
@@ -90,12 +163,17 @@ void send_thread(const char* forward_ip, int forward_port) {
 
         if (enable_latency) {
             auto now = std::chrono::high_resolution_clock::now();
-            auto now_ns = std::chrono::duration_cast<std::chrono::nanoseconds>(now.time_since_epoch()).count();
-            auto latency_ns = std::chrono::duration_cast<std::chrono::nanoseconds>(now - msg.timestamp).count();
+            auto now_ns = static_cast<uint64_t>(
+                std::chrono::duration_cast<std::chrono::nanoseconds>(now.time_since_epoch()).count()
+            );
+            auto latency_ns = static_cast<uint64_t>(
+                std::chrono::duration_cast<std::chrono::nanoseconds>(now - msg.timestamp).count()
+            );
             std::string clordid = extract_fix_tag11(msg.data.data(), msg.length);
-            std::cout << "[send] now: " << now_ns
-                << " ns, latency: " << latency_ns
-                << " ns, tag11: " << clordid << std::endl;
+
+            LogEntry entry{now_ns, latency_ns};
+            std::strncpy(entry.clordid.data(), clordid.c_str(), entry.clordid.size() - 1);
+            log_queue.push(entry);
         }
 
         ssize_t sent = send(forward_sock, msg.data.data(), msg.length, 0);
@@ -109,9 +187,13 @@ void send_thread(const char* forward_ip, int forward_port) {
     std::cout << "[send] Forward socket closed" << std::endl;
 }
 
+// ---------------------- Main ----------------------
+
 int main(int argc, char* argv[]) {
     if (argc < 7) {
-        std::cerr << "Usage: " << argv[0] << " <listen_ip> <listen_port> <forward_ip> <forward_port> <rx_cpu> <tx_cpu> [--measure-latency]" << std::endl;
+        std::cerr << "Usage: " << argv[0]
+                  << " <listen_ip> <listen_port> <forward_ip> <forward_port> <rx_cpu> <tx_cpu> "
+                  << "[--measure-latency <log_file> <flush_interval_ms>]" << std::endl;
         return 1;
     }
 
@@ -122,8 +204,16 @@ int main(int argc, char* argv[]) {
     int rx_cpu = std::stoi(argv[5]);
     int tx_cpu = std::stoi(argv[6]);
 
-    if (argc >= 8 && std::string(argv[7]) == "--measure-latency") {
+    if (argc >= 10 && std::string(argv[7]) == "--measure-latency") {
         enable_latency = true;
+        log_file_path = argv[8];
+        log_flush_interval_ms = std::stoi(argv[9]);
+
+        std::thread logger(log_writer_thread, log_file_path, log_flush_interval_ms);
+        logger.detach();
+    } else if (argc >= 8 && std::string(argv[7]) == "--measure-latency") {
+        std::cerr << "Missing log file path and flush interval after --measure-latency" << std::endl;
+        return 1;
     }
 
     int listen_sock = socket(AF_INET, SOCK_STREAM, 0);
