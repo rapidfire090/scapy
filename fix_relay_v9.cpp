@@ -17,15 +17,13 @@
 struct Message {
     std::array<char, 1024> data;
     size_t length;
-    uint64_t recv_start_ns;
     uint64_t recv_end_ns;
 };
 
 struct LogEntry {
-    uint64_t recv_start_ns;
-    uint64_t recv_delta_ns;
+    uint64_t timestamp_ns;
     uint64_t latency_ns;
-    uint64_t send_delta_ns;
+    uint64_t send_latency_ns;
     uint64_t total_latency_ns;
     std::array<char, 32> clordid;
 };
@@ -88,10 +86,9 @@ void log_writer_thread(const std::string& file_path, int flush_interval_ms) {
         std::this_thread::sleep_for(std::chrono::milliseconds(flush_interval_ms));
         LogEntry entry;
         while (log_queue.pop(entry)) {
-            out << entry.recv_start_ns << ","
-                << entry.recv_delta_ns << ","
+            out << entry.timestamp_ns << ","
                 << entry.latency_ns << ","
-                << entry.send_delta_ns << ","
+                << entry.send_latency_ns << ","
                 << entry.total_latency_ns << ","
                 << entry.clordid.data() << "\n";
         }
@@ -103,9 +100,6 @@ void recv_thread(int client_sock) {
     std::cout << "[recv] Thread started" << std::endl;
     while (true) {
         Message msg;
-        msg.recv_start_ns = std::chrono::duration_cast<std::chrono::nanoseconds>(
-            std::chrono::high_resolution_clock::now().time_since_epoch()).count();
-
         ssize_t len = recv(client_sock, msg.data.data(), msg.data.size(), 0);
 
         msg.recv_end_ns = std::chrono::duration_cast<std::chrono::nanoseconds>(
@@ -176,13 +170,12 @@ void send_thread(const char* forward_ip, int forward_port) {
         }
 
         if (enable_latency && debug_level == 2) {
-            uint64_t recv_delta = msg.recv_end_ns - msg.recv_start_ns;
             uint64_t latency = send_start_ns - msg.recv_end_ns;
-            uint64_t send_delta = send_end_ns - send_start_ns;
-            uint64_t total = recv_delta + latency + send_delta;
+            uint64_t send_latency = send_end_ns - send_start_ns;
+            uint64_t total = latency + send_latency;
 
             std::string clordid_str = extract_fix_tag11(msg.data.data(), msg.length);
-            LogEntry entry{msg.recv_start_ns, recv_delta, latency, send_delta, total};
+            LogEntry entry{msg.recv_end_ns, latency, send_latency, total};
             std::strncpy(entry.clordid.data(), clordid_str.c_str(), entry.clordid.size() - 1);
             log_queue.push(entry);
         }
