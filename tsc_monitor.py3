@@ -1,60 +1,43 @@
-import time
 import ctypes
-import os
+import mmap
+import struct
+import time
 
-# Define rdtsc using ctypes and inline assembly
-class RDTSC:
-    def __init__(self):
-        self.lib = ctypes.CDLL(None)
-        self.rdtsc_func = self._build_rdtsc()
+# Allocate executable memory and write machine code for rdtsc
+def make_rdtsc():
+    # x86_64 machine code: rdtsc; shl rdx, 32; or rax, rdx; ret
+    code = b'\x0f\x31\x48\xc1\xe2\x20\x48\x09\xd0\xc3'
 
-    def _build_rdtsc(self):
-        # Use inline assembly with ctypes to read TSC
-        # This defines a small function in memory that calls `rdtsc`
-        from ctypes import CFUNCTYPE, c_uint64
-        import mmap
+    # Allocate RWX memory
+    buf = mmap.mmap(-1, len(code), prot=mmap.PROT_READ | mmap.PROT_WRITE | mmap.PROT_EXEC)
+    buf.write(code)
 
-        # x86_64 machine code for: rdtsc; shl rdx, 32; or rax, rdx; ret
-        code = bytearray([
-            0x0F, 0x31,                  # rdtsc
-            0x48, 0xC1, 0xE2, 0x20,      # shl rdx, 32
-            0x48, 0x09, 0xD0,            # or rax, rdx
-            0xC3                         # ret
-        ])
+    # Create a function pointer to the machine code
+    address = ctypes.addressof(ctypes.c_char.from_buffer(buf))
+    rdtsc_func = ctypes.CFUNCTYPE(ctypes.c_uint64)(address)
 
-        # Allocate executable memory
-        buf = mmap.mmap(-1, len(code), prot=mmap.PROT_READ | mmap.PROT_WRITE | mmap.PROT_EXEC)
-        buf.write(code)
+    return rdtsc_func
 
-        # Create function pointer
-        FUNC = CFUNCTYPE(c_uint64)
-        return FUNC(ctypes.addressof(ctypes.c_void_p.from_buffer(buf)))
+# Setup
+rdtsc = make_rdtsc()
 
-    def read(self):
-        return self.rdtsc_func()
-
-# Get base TSC frequency (or set manually if known)
-TSC_FREQ_GHZ = 2.7  # adjust for your CPU (e.g. 2.7 GHz)
-CYCLES_PER_US = TSC_FREQ_GHZ * 1000  # cycles per microsecond
-
-# Threshold to flag potential SMIs (e.g., > 500µs)
+# Estimate TSC frequency (or use known value)
+TSC_FREQ_GHZ = 2.7  # Adjust for your system
+CYCLES_PER_US = TSC_FREQ_GHZ * 1000
 THRESHOLD_US = 500
 THRESHOLD_CYCLES = int(CYCLES_PER_US * THRESHOLD_US)
-
-# Sampling interval
 SLEEP_TIME = 0.1  # seconds
 
-rdtsc = RDTSC()
-print(f"Monitoring TSC deltas... Threshold: {THRESHOLD_US} µs ({THRESHOLD_CYCLES} cycles)")
+print(f"Monitoring TSC deltas... Threshold: {THRESHOLD_US} µs ({THRESHOLD_CYCLES:.0f} cycles)")
 
+# Loop
 while True:
-    t1 = rdtsc.read()
+    t1 = rdtsc()
     time.sleep(SLEEP_TIME)
-    t2 = rdtsc.read()
+    t2 = rdtsc()
     delta = t2 - t1
 
     if delta > THRESHOLD_CYCLES:
-        delta_us = delta / CYCLES_PER_US
-        print(f"[ALERT] High TSC delta: {delta} cycles ≈ {delta_us:.1f} µs")
+        print(f"[ALERT] High TSC delta: {delta} cycles (~{delta / CYCLES_PER_US:.1f} µs)")
     else:
         print(f"TSC delta: {delta} cycles")
