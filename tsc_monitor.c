@@ -1,79 +1,78 @@
-#define _GNU_SOURCE
 #include <stdio.h>
 #include <stdint.h>
 #include <unistd.h>
-#include <time.h>
-#include <sched.h>
-#include <getopt.h>
 #include <stdlib.h>
-#include <x86intrin.h>
+#include <time.h>
+#include <string.h>
+#include <sched.h>
 
-void pin_to_core(int core_id) {
-    cpu_set_t cpuset;
-    CPU_ZERO(&cpuset);
-    CPU_SET(core_id, &cpuset);
-    if (sched_setaffinity(0, sizeof(cpuset), &cpuset) != 0) {
-        perror("sched_setaffinity");
-    }
+// Default values
+#define DEFAULT_SLEEP_US 10000
+#define DEFAULT_THRESHOLD_US 500
+#define DEFAULT_FREQ_GHZ 2.7
+
+static inline uint64_t rdtsc(void) {
+    unsigned int lo, hi;
+    __asm__ volatile ("rdtsc" : "=a" (lo), "=d" (hi));
+    return ((uint64_t)hi << 32) | lo;
 }
 
-void print_usage(const char *prog) {
-    printf("Usage: %s [--core N] [--freq GHz] [--threshold us] [--sleep us]\n", prog);
-    printf("  --core       CPU core to pin to (default: 0)\n");
-    printf("  --freq       TSC frequency in GHz (default: 2.7)\n");
-    printf("  --threshold  Alert threshold in microseconds (default: 500)\n");
-    printf("  --sleep      Sleep time between measurements in microseconds (default: 100000)\n");
+void print_usage(char *prog) {
+    fprintf(stderr, "Usage: %s [-f freq_ghz] [-t threshold_us] [-s sleep_us] [-c core] [-v]\n", prog);
+    fprintf(stderr, "  -f CPU frequency in GHz (default %.1f)\n", DEFAULT_FREQ_GHZ);
+    fprintf(stderr, "  -t Threshold in microseconds (default %d us)\n", DEFAULT_THRESHOLD_US);
+    fprintf(stderr, "  -s Sleep interval in microseconds (default %d us)\n", DEFAULT_SLEEP_US);
+    fprintf(stderr, "  -c Pin to core (optional)\n");
+    fprintf(stderr, "  -v Verbose mode: print every delta (default: only print when above threshold)\n");
 }
 
-int main(int argc, char *argv[]) {
-    int core = 0;
-    double freq_ghz = 2.7;
-    uint64_t threshold_us = 500;
-    uint64_t sleep_us = 100000;
-
-    static struct option long_options[] = {
-        {"core", required_argument, 0, 'c'},
-        {"freq", required_argument, 0, 'f'},
-        {"threshold", required_argument, 0, 't'},
-        {"sleep", required_argument, 0, 's'},
-        {0, 0, 0, 0}
-    };
-
+int main(int argc, char **argv) {
+    double freq_ghz = DEFAULT_FREQ_GHZ;
+    int threshold_us = DEFAULT_THRESHOLD_US;
+    int sleep_us = DEFAULT_SLEEP_US;
+    int core = -1;
+    int verbose = 0;
     int opt;
-    while ((opt = getopt_long(argc, argv, "c:f:t:s:", long_options, NULL)) != -1) {
+
+    while ((opt = getopt(argc, argv, "f:t:s:c:v")) != -1) {
         switch (opt) {
-            case 'c': core = atoi(optarg); break;
             case 'f': freq_ghz = atof(optarg); break;
-            case 't': threshold_us = strtoull(optarg, NULL, 10); break;
-            case 's': sleep_us = strtoull(optarg, NULL, 10); break;
-            default:
-                print_usage(argv[0]);
-                return 1;
+            case 't': threshold_us = atoi(optarg); break;
+            case 's': sleep_us = atoi(optarg); break;
+            case 'c': core = atoi(optarg); break;
+            case 'v': verbose = 1; break;
+            default: print_usage(argv[0]); return 1;
         }
     }
 
-    pin_to_core(core);
+    if (core >= 0) {
+        cpu_set_t cpuset;
+        CPU_ZERO(&cpuset);
+        CPU_SET(core, &cpuset);
+        if (sched_setaffinity(0, sizeof(cpuset), &cpuset) != 0) {
+            perror("sched_setaffinity");
+            return 1;
+        }
+    }
 
-    double cycles_per_us = freq_ghz * 1000.0;
-    uint64_t threshold_cycles = (uint64_t)(threshold_us * cycles_per_us);
-
-    printf("Monitoring TSC deltas...\n");
-    printf("  Core       : %d\n", core);
-    printf("  TSC freq   : %.3f GHz\n", freq_ghz);
-    printf("  Threshold  : %lu us (%lu cycles)\n", threshold_us, threshold_cycles);
-    printf("  Sleep time : %lu us\n\n", sleep_us);
+    uint64_t threshold_cycles = (uint64_t)(threshold_us * freq_ghz * 1000.0);
+    struct timespec sleep_time = { .tv_sec = sleep_us / 1000000, .tv_nsec = (sleep_us % 1000000) * 1000 };
 
     while (1) {
-        uint64_t t1 = __rdtsc();
-        usleep(sleep_us);
-        uint64_t t2 = __rdtsc();
+        struct timespec now;
+        clock_gettime(CLOCK_REALTIME, &now);  // timestamp before t1
+        uint64_t t1 = rdtsc();
+        nanosleep(&sleep_time, NULL);
+        uint64_t t2 = rdtsc();
 
         uint64_t delta = t2 - t1;
-        if (delta > threshold_cycles) {
-            printf("[ALERT] High TSC delta: %lu cycles (%.1f us)\n",
-                   delta, delta / cycles_per_us);
-        } else {
-            printf("TSC delta: %lu cycles\n", delta);
+
+        if (verbose || delta > threshold_cycles) {
+            printf("[%ld.%09ld] delta: %lu cycles (%.2f us)\n",
+                   now.tv_sec, now.tv_nsec,
+                   delta,
+                   delta / (freq_ghz * 1000.0));
+            fflush(stdout);
         }
     }
 
