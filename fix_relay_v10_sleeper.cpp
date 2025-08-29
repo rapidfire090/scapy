@@ -14,6 +14,9 @@
 #include <sched.h>
 #include <sys/resource.h>
 
+// Onload Extensions
+#include <onload/extensions.h>
+
 struct Message {
     std::array<char, 1024> data;
     size_t length;
@@ -96,7 +99,17 @@ void log_writer_thread(const std::string& file_path, int flush_interval_ms) {
     }
 }
 
+// RX: accelerate this thread, move accepted socket into this stack
 void recv_thread(int client_sock) {
+    onload_set_stackname(ONLOAD_THIS_THREAD, ONLOAD_SCOPE_THREAD, "rx_stack");
+    onload_thread_set_spin(ONLOAD_SPIN_ALL, 1);  // optional
+
+    // Move accepted socket (created in main) into this thread's Onload stack
+    if (onload_move_fd(client_sock) < 0) {
+        // If move fails (kernel socket / not onload-capable), continue anyway
+        // perror("[recv] onload_move_fd");
+    }
+
     std::cout << "[recv] Thread started" << std::endl;
     while (true) {
         Message msg;
@@ -124,7 +137,11 @@ void recv_thread(int client_sock) {
     std::cout << "[recv] Closed client socket" << std::endl;
 }
 
+// TX: accelerate this thread; create forward socket in this stack
 void send_thread(const char* forward_ip, int forward_port) {
+    onload_set_stackname(ONLOAD_THIS_THREAD, ONLOAD_SCOPE_THREAD, "tx_stack");
+    onload_thread_set_spin(ONLOAD_SPIN_ALL, 1);  // optional
+
     std::cout << "[send] Connecting to " << forward_ip << ":" << forward_port << std::endl;
 
     int forward_sock = socket(AF_INET, SOCK_STREAM, 0);
@@ -185,7 +202,7 @@ void send_thread(const char* forward_ip, int forward_port) {
     std::cout << "[send] Forward socket closed" << std::endl;
 }
 
-// --- NEW: sleeper thread that runs forever ---
+// Sleeper: default (no Onload calls), pinned to its CPU
 void sleeper_thread() {
     std::cout << "[sleeper] Thread started (sleeping indefinitely)" << std::endl;
     while (true) {
@@ -225,7 +242,7 @@ int main(int argc, char* argv[]) {
         logger.detach();
     }
 
-    // Start sleeper and pin to sleep_cpu
+    // Start sleeper and pin it
     std::thread sleeper(sleeper_thread);
     {
         cpu_set_t set_sl;
@@ -268,6 +285,7 @@ int main(int argc, char* argv[]) {
         if (client_sock >= 0) {
             std::cout << "[main] Accepted connection" << std::endl;
 
+            // RX thread will move this fd into its own stack
             std::thread rx(recv_thread, client_sock);
             cpu_set_t set_rx;
             CPU_ZERO(&set_rx);
@@ -275,6 +293,7 @@ int main(int argc, char* argv[]) {
             pthread_setaffinity_np(rx.native_handle(), sizeof(cpu_set_t), &set_rx);
             rx.detach();
 
+            // TX thread creates its own accelerated socket
             std::thread tx(send_thread, forward_ip, forward_port);
             cpu_set_t set_tx;
             CPU_ZERO(&set_tx);
