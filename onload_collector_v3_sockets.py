@@ -1,30 +1,33 @@
-#!/usr/bin/env python3
-import sys
-import argparse
-import json
+from prometheus_client import start_http_server
+from prometheus_client.core import CounterMetricFamily, REGISTRY
+import subprocess
 import re
-from pathlib import Path
-from typing import List, Dict, Any, Tuple, Optional
+import time
+import argparse
 
-SECTION_RE = re.compile(r'^-+\s*([A-Za-z0-9_ ]+?)\s*-+\s*$')
+# Regex patterns (existing)
+DUMP_HEADER_RE = re.compile(
+    r'^\s*ci_netif_dump_to_logger:\s*stack=(?P<stack_id>\d+)(?:\s+name=(?P<stack_name>\S*))?',
+    re.IGNORECASE
+)
+ONLOAD_PID_RE = re.compile(r'Onload\s+(?P<version>[\d\.]+).*?pid=(?P<pid>\d+)', re.IGNORECASE)
+SECTION_RE = re.compile(r'^-+\s*(?P<header>\w+):\s*(?P<stack_id>\d+)\s*-+', re.IGNORECASE)
+METRIC_RE = re.compile(r'^\s*(?P<key>\w+)\s*:\s*(\d+)', re.IGNORECASE)
+TARGET_HEADER = 'ci_netif_stats'
 
-# ===== Sockets section support =====
-# Matches the opening title line for sockets
-_SOCKETS_OPEN_RE = re.compile(r'^\-+\s*sockets\s*\-+\s*$', re.IGNORECASE)
-# Matches any titled section header (e.g., '--- ci_netif_stats ---') to know when sockets section ends
-_SECTION_TITLE_RE = re.compile(r'^\-+\s*[A-Za-z_ ].*?\-+\s*$')
-# A line of only dashes used as socket block separators (e.g., '--------')
-_DASH_ONLY_RE = re.compile(r'^\-+\s*$')
-# Socket header: e.g., "TCP 0:3 lcl=10.80.20.212:22605 rmt=0.0.0.0:0 LISTEN"
-_SOCK_HDR_RE = re.compile(r'^(TCP|UDP)\s+(\d+):(\d+)\s+lcl=([^\s]+)\s+rmt=([^\s]+)\s+(\S+)\s*$')
+# New: sockets-section helpers
+SOCKETS_OPEN_RE = re.compile(r'^\-+\s*sockets\s*\-+\s*$', re.IGNORECASE)
+SECTION_TITLE_RE = re.compile(r'^\-+\s*[A-Za-z_ ].*?\-+\s*$')  # generic titled header after sockets
+DASH_ONLY_RE = re.compile(r'^\-+\s*$')
+SOCK_HDR_RE = re.compile(
+    r'^(TCP|UDP)\s+(\d+):(\d+)\s+lcl=([^\s]+)\s+rmt=([^\s]+)\s+(\S+)\s*$'
+)
 
 def _iter_socket_kv(line: str):
     """
-    Yield (key, value) pairs from a metrics line inside a socket block.
-    If the line has a leading label like 'listenq:' / 'rcv:' / 'snd:', prefix keys:
-        'listenq.max=2048' -> ('listenq.max', '2048')
-    IMPORTANT: treat a prefix only if the first ':' occurs before the first '='
-              so '10.0.0.1:80' is not misinterpreted as a label.
+    Yield (key, value_str) pairs from a metrics line inside a socket block.
+    If the line starts with a label like 'listenq:' / 'rcv:' / 'snd:' before any '=' appears,
+    prefix keys, e.g. 'listenq.max' for 'listenq: max=...'.
     """
     first_colon = line.find(':')
     first_equal = line.find('=')
@@ -39,161 +42,221 @@ def _iter_socket_kv(line: str):
         k, v = m.group(1), m.group(2)
         yield (f"{prefix}.{k}" if prefix else k, v)
 
-def parse_sockets_section(lines: List[str], start_idx: int) -> Tuple[List[Dict[str, Any]], int]:
+def _to_int_or_none(val: str):
     """
-    Parse a '--- sockets ---' section starting at start_idx (the header line index).
-    Each socket block:
-      - header: 'TCP|UDP {stack}:{index} lcl=IP:port rmt=IP:port STATE'
-      - followed by any number of metrics lines with field=value pairs
-      - terminated by a dashed line '--------' (any number of dashes)
-    The sockets section ends when the next titled section header is encountered.
-    Returns (sockets_list, next_index_after_section).
+    Convert a numeric-looking string to int. Accepts decimal or hex (0x...).
+    Returns None if not parseable as integer.
     """
-    sockets: List[Dict[str, Any]] = []
-    cur: Optional[Dict[str, Any]] = None
-    i = start_idx + 1
-    n = len(lines)
+    try:
+        # int(x, 0) lets Python auto-detect base with 0x prefix
+        return int(val, 0)
+    except Exception:
+        # Sometimes values may include punctuation like trailing commas or parentheses.
+        # Try stripping common trailing chars.
+        cleaned = val.rstrip(',);')
+        try:
+            return int(cleaned, 0)
+        except Exception:
+            return None
 
-    while i < n:
-        raw = lines[i]
-        line = raw.rstrip()
+class OnloadCollector:
+    def __init__(self, timeout):
+        self.timeout = timeout
 
-        # If we see the next titled section header (not just a separator), sockets section ends.
-        if _SECTION_TITLE_RE.match(line) and not _DASH_ONLY_RE.match(line):
-            if cur is not None:
-                sockets.append(cur)
-                cur = None
-            break
+    def collect(self):
+        try:
+            output = subprocess.check_output(
+                ['onload_stackdump', 'lots'], universal_newlines=True, timeout=self.timeout
+            )
+        except subprocess.TimeoutExpired:
+            print('Timeout: onload_stackdump hung')
+            return
+        except subprocess.CalledProcessError:
+            print('onload_stackdump failed with non-zero exit')
+            return
+        except Exception as e:
+            print(f"General error calling onload_stackdump: {e}")
+            return
 
-        # Socket boundary separator
-        if _DASH_ONLY_RE.match(line):
-            if cur is not None:
-                sockets.append(cur)
-                cur = None
+        # Store metric samples before emitting families
+        # Existing ci_netif_stats metrics:
+        ci_metrics_data = {}
+        # New sockets metrics:
+        # Key: metric_name -> list of (labels_list, value)
+        sockets_metrics_data = {}
+
+        current_stack = None
+        current_version = None
+        current_pid = None
+        current_stack_name = ''
+        in_ci_section = False
+
+        # Sockets parsing state
+        in_sockets_section = False
+        cur_sock = None  # dict with labels & fields for current socket block
+
+        lines = output.splitlines()
+        i = 0
+        n = len(lines)
+
+        while i < n:
+            line = lines[i].rstrip('\n')
             i += 1
-            continue
 
-        # New socket header?
-        m = _SOCK_HDR_RE.match(line)
-        if m:
-            if cur is not None:
-                sockets.append(cur)
-            proto, stack, idx, lcl, rmt, state = m.groups()
-            cur = {
-                "proto": proto,
-                "stack": int(stack),
-                "index": int(idx),
-                "lcl": lcl,
-                "rmt": rmt,
-                "state": state,
-            }
-            i += 1
-            continue
+            # Detect new dump header (resets per-stack state)
+            m = DUMP_HEADER_RE.match(line)
+            if m:
+                current_stack = m.group('stack_id')
+                current_stack_name = m.group('stack_name') or ''
+                current_version = None
+                current_pid = None
+                in_ci_section = False
+                # sockets: leaving whatever section we were in
+                in_sockets_section = False
+                cur_sock = None
+                continue
 
-        # Accumulate metrics (field=value pairs), possibly prefixed by a label
-        if cur is not None:
-            for k, v in _iter_socket_kv(line):
-                cur[k] = v
+            # Capture Onload version & pid after we know current stack
+            if current_stack and current_version is None:
+                m2 = ONLOAD_PID_RE.search(line)
+                if m2:
+                    current_version = m2.group('version')
+                    current_pid = m2.group('pid')
+                    continue
 
-        i += 1
+            # Standard titled sections like: --- ci_netif_stats: <stackid> ---
+            m3 = SECTION_RE.match(line)
+            if m3:
+                hdr = m3.group('header').lower()
+                sid = m3.group('stack_id')
+                in_ci_section = (hdr == TARGET_HEADER and sid == current_stack)
+                # entering a titled section -> sockets section definitely off
+                if in_sockets_section and cur_sock is not None:
+                    # flush any dangling socket
+                    cur_sock = None
+                in_sockets_section = False
+                continue
 
-    # If we ended the file while in a socket block, push it.
-    if cur is not None:
-        sockets.append(cur)
+            # Sockets section title: --- sockets ---
+            if SOCKETS_OPEN_RE.match(line):
+                in_sockets_section = True
+                in_ci_section = False
+                # reset current socket block
+                cur_sock = None
+                continue
 
-    return sockets, i
+            # If we're not in ci_netif_stats nor sockets, keep scanning
+            if not in_ci_section and not in_sockets_section:
+                continue
 
-# ===== Generic section collector =====
-def parse_generic_block(lines: List[str], start_idx: int) -> Tuple[List[str], int]:
-    """
-    Collect raw lines of a section until the next titled header.
-    Useful for preserving unknown sections; caller can parse later if desired.
-    Returns (list_of_lines, next_index_after_section).
-    """
-    i = start_idx + 1
-    n = len(lines)
-    buf: List[str] = []
-    while i < n:
-        line = lines[i].rstrip('\n')
-        if SECTION_RE.match(line):
-            break
-        buf.append(line)
-        i += 1
-    return buf, i
+            # =========================
+            # Existing ci_netif_stats
+            # =========================
+            if in_ci_section and current_stack and current_version and current_pid:
+                m4 = METRIC_RE.match(line)
+                if m4:
+                    key = m4.group(1).lower()
+                    val = int(m4.group(2))
+                    metric_name = f"onload_{TARGET_HEADER}_{key}"
+                    labels = [current_stack, current_pid, current_version, current_stack_name]
+                    ci_metrics_data.setdefault(metric_name, []).append((labels, val))
+                continue
 
-def parse_stackdump_text(text: str) -> Dict[str, Any]:
-    lines = text.splitlines()
-    out: Dict[str, Any] = {}
-    i = 0
-    n = len(lines)
-    while i < n:
-        line = lines[i].rstrip('\n')
-        m = SECTION_RE.match(line)
-        if not m:
-            i += 1
-            continue
+            # =========================
+            # New sockets parsing
+            # =========================
+            if in_sockets_section and current_stack and current_version and current_pid:
+                # If we see a titled header for some other section, sockets end.
+                if SECTION_TITLE_RE.match(line) and not DASH_ONLY_RE.match(line):
+                    if cur_sock is not None:
+                        # finalize previous socket before leaving (no emission here; we emit after loop)
+                        cur_sock = None
+                    in_sockets_section = False
+                    continue
 
-        section_name = m.group(1).strip().lower().replace(' ', '_')
+                # Socket boundary separator (--------)
+                if DASH_ONLY_RE.match(line):
+                    # Finish the previous socket (if any)
+                    cur_sock = None
+                    continue
 
-        # sockets
-        if section_name == 'sockets':
-            sockets, i = parse_sockets_section(lines, i)
-            out['sockets'] = sockets
-            continue
+                # New socket header?
+                mh = SOCK_HDR_RE.match(line)
+                if mh:
+                    # 'TCP|UDP {stack}:{index} lcl=... rmt=... STATE'
+                    proto, stack_num, sock_index, lcl, rmt, state = mh.groups()
+                    # Only record sockets of this stack (defensive match)
+                    if current_stack is None or stack_num != str(current_stack):
+                        # Still accept, but we keep the stack label as reported by the current dump header
+                        pass
+                    # Begin a new socket context
+                    cur_sock = {
+                        "proto": proto,
+                        "sock_index": sock_index,
+                        "lcl": lcl,
+                        "rmt": rmt,
+                        "state": state,
+                    }
+                    continue
 
-        # generic fallback for other sections: collect raw lines
-        raw_block, i = parse_generic_block(lines, i)
-        out[section_name] = raw_block
+                # Metrics for current socket (key=value tokens, possibly prefixed by label:)
+                if cur_sock is not None:
+                    for k, v_str in _iter_socket_kv(line):
+                        # Try to convert to integer; skip non-numeric values
+                        ival = _to_int_or_none(v_str)
+                        if ival is None:
+                            continue
+                        metric_name = f"onload_sockets_{k.lower()}"
+                        # labels keep same base + socket identifiers
+                        labels = [
+                            str(current_stack),
+                            str(current_pid),
+                            str(current_version),
+                            str(current_stack_name),
+                            cur_sock.get("proto", ""),
+                            str(cur_sock.get("sock_index", "")),
+                            cur_sock.get("lcl", ""),
+                            cur_sock.get("rmt", ""),
+                            cur_sock.get("state", ""),
+                        ]
+                        sockets_metrics_data.setdefault(metric_name, []).append((labels, ival))
+                # continue loop
 
-    return out
+        # Emit ci_netif_stats metrics (unchanged behavior)
+        for metric_name, samples in ci_metrics_data.items():
+            c = CounterMetricFamily(
+                metric_name,
+                f"Onload {TARGET_HEADER} metric",
+                labels=['stack_id', 'pid', 'onload_version', 'stack_name']
+            )
+            for labels, val in samples:
+                c.add_metric(labels, val)
+            yield c
 
-def main():
-    p = argparse.ArgumentParser(description="Parse onload stackdump, including --- sockets --- section.")
-    p.add_argument("files", nargs="+", help="Input stackdump text files")
-    p.add_argument("--json-out", help="Write combined JSON to this path")
-    p.add_argument("--sockets-csv", help="Optional CSV of parsed sockets across all inputs")
-    args = p.parse_args()
+        # Emit sockets metrics as additional CounterMetricFamily series
+        # Label schema is fixed to distinguish sockets without changing base structure (still CounterMetricFamily).
+        sockets_label_names = [
+            'stack_id', 'pid', 'onload_version', 'stack_name',
+            'proto', 'sock_index', 'lcl', 'rmt', 'state'
+        ]
+        for metric_name, samples in sockets_metrics_data.items():
+            c = CounterMetricFamily(
+                metric_name,
+                "Onload sockets metrics parsed from --- sockets --- section",
+                labels=sockets_label_names
+            )
+            for labels, val in samples:
+                c.add_metric(labels, val)
+            yield c
 
-    combined: Dict[str, Any] = {"inputs": []}
-    all_sockets: List[Dict[str, Any]] = []
+if __name__ == '__main__':
+    parser = argparse.ArgumentParser(description='Onload ci_netif_stats + sockets exporter')
+    parser.add_argument('--port', type=int, default=9100, help='HTTP port for Prometheus metrics')
+    parser.add_argument('--timeout', type=float, default=1.0, help='Timeout in seconds for onload_stackdump command')
+    args = parser.parse_args()
 
-    for f in args.files:
-        path = Path(f)
-        txt = path.read_text(errors="ignore")
-        parsed = parse_stackdump_text(txt)
-        combined["inputs"].append({"file": str(path), "data": parsed})
-        if "sockets" in parsed:
-            # tag each row with filename
-            for row in parsed["sockets"]:
-                row_with_src = dict(row)
-                row_with_src["_source_file"] = str(path.name)
-                all_sockets.append(row_with_src)
+    REGISTRY.register(OnloadCollector(timeout=args.timeout))
+    start_http_server(args.port)
 
-    if args.json_out:
-        Path(args.json_out).write_text(json.dumps(combined, indent=2))
-        print(f"Wrote JSON: {args.json_out}")
-
-    if args.sockets_csv and all_sockets:
-        # Derive header set
-        keys: List[str] = []
-        seen = set()
-        for r in all_sockets:
-            for k in r.keys():
-                if k not in seen:
-                    seen.add(k)
-                    keys.append(k)
-        # write CSV
-        import csv
-        with open(args.sockets_csv, "w", newline="") as fh:
-            w = csv.DictWriter(fh, fieldnames=keys)
-            w.writeheader()
-            for r in all_sockets:
-                w.writerow(r)
-        print(f"Wrote sockets CSV: {args.sockets_csv}")
-
-    if not args.json_out:
-        # default: print combined JSON to stdout
-        print(json.dumps(combined, indent=2))
-
-if __name__ == "__main__":
-    main()
+    while True:
+        time.sleep(60)
