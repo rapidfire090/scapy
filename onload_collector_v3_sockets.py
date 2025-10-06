@@ -5,7 +5,6 @@ import re
 import time
 import argparse
 
-# Regex patterns (existing)
 DUMP_HEADER_RE = re.compile(
     r'^\s*ci_netif_dump_to_logger:\s*stack=(?P<stack_id>\d+)(?:\s+name=(?P<stack_name>\S*))?',
     re.IGNORECASE
@@ -17,22 +16,23 @@ TARGET_HEADER = 'ci_netif_stats'
 
 # New: sockets-section helpers
 SOCKETS_OPEN_RE = re.compile(r'^\-+\s*sockets\s*\-+\s*$', re.IGNORECASE)
-SECTION_TITLE_RE = re.compile(r'^\-+\s*[A-Za-z_ ].*?\-+\s*$')  # generic titled header after sockets
+SECTION_TITLE_RE = re.compile(r'^\-+\s*[A-Za-z_ ].*?\-+\s*$')
 DASH_ONLY_RE = re.compile(r'^\-+\s*$')
 SOCK_HDR_RE = re.compile(
     r'^(TCP|UDP)\s+(\d+):(\d+)\s+lcl=([^\s]+)\s+rmt=([^\s]+)\s+(\S+)\s*$'
 )
 
+
 def _iter_socket_kv(line: str):
     """
     Yield (key, value_str) pairs from a metrics line inside a socket block.
-    If the line starts with a label like 'listenq:' / 'rcv:' / 'snd:' before any '=' appears,
-    prefix keys, e.g. 'listenq.max' for 'listenq: max=...'.
+    If the line starts with a label like 'listenq:' or 'TX timestamping queue:',
+    prefix keys, e.g. 'TX_timestamping_queue.q_pkts'.
     """
     first_colon = line.find(':')
     first_equal = line.find('=')
     if first_colon != -1 and (first_equal == -1 or first_colon < first_equal):
-        prefix = line[:first_colon].strip()
+        prefix = line[:first_colon].strip().replace(" ", "_")  # normalize spaces to underscores
         body = line[first_colon + 1 :]
     else:
         prefix = None
@@ -42,22 +42,18 @@ def _iter_socket_kv(line: str):
         k, v = m.group(1), m.group(2)
         yield (f"{prefix}.{k}" if prefix else k, v)
 
+
 def _to_int_or_none(val: str):
-    """
-    Convert a numeric-looking string to int. Accepts decimal or hex (0x...).
-    Returns None if not parseable as integer.
-    """
+    """Convert numeric-like strings to int, including hex."""
     try:
-        # int(x, 0) lets Python auto-detect base with 0x prefix
         return int(val, 0)
     except Exception:
-        # Sometimes values may include punctuation like trailing commas or parentheses.
-        # Try stripping common trailing chars.
         cleaned = val.rstrip(',);')
         try:
             return int(cleaned, 0)
         except Exception:
             return None
+
 
 class OnloadCollector:
     def __init__(self, timeout):
@@ -78,11 +74,7 @@ class OnloadCollector:
             print(f"General error calling onload_stackdump: {e}")
             return
 
-        # Store metric samples before emitting families
-        # Existing ci_netif_stats metrics:
         ci_metrics_data = {}
-        # New sockets metrics:
-        # Key: metric_name -> list of (labels_list, value)
         sockets_metrics_data = {}
 
         current_stack = None
@@ -91,9 +83,8 @@ class OnloadCollector:
         current_stack_name = ''
         in_ci_section = False
 
-        # Sockets parsing state
         in_sockets_section = False
-        cur_sock = None  # dict with labels & fields for current socket block
+        cur_sock = None
 
         lines = output.splitlines()
         i = 0
@@ -103,7 +94,6 @@ class OnloadCollector:
             line = lines[i].rstrip('\n')
             i += 1
 
-            # Detect new dump header (resets per-stack state)
             m = DUMP_HEADER_RE.match(line)
             if m:
                 current_stack = m.group('stack_id')
@@ -111,12 +101,10 @@ class OnloadCollector:
                 current_version = None
                 current_pid = None
                 in_ci_section = False
-                # sockets: leaving whatever section we were in
                 in_sockets_section = False
                 cur_sock = None
                 continue
 
-            # Capture Onload version & pid after we know current stack
             if current_stack and current_version is None:
                 m2 = ONLOAD_PID_RE.search(line)
                 if m2:
@@ -124,34 +112,25 @@ class OnloadCollector:
                     current_pid = m2.group('pid')
                     continue
 
-            # Standard titled sections like: --- ci_netif_stats: <stackid> ---
             m3 = SECTION_RE.match(line)
             if m3:
                 hdr = m3.group('header').lower()
                 sid = m3.group('stack_id')
                 in_ci_section = (hdr == TARGET_HEADER and sid == current_stack)
-                # entering a titled section -> sockets section definitely off
-                if in_sockets_section and cur_sock is not None:
-                    # flush any dangling socket
-                    cur_sock = None
                 in_sockets_section = False
-                continue
-
-            # Sockets section title: --- sockets ---
-            if SOCKETS_OPEN_RE.match(line):
-                in_sockets_section = True
-                in_ci_section = False
-                # reset current socket block
                 cur_sock = None
                 continue
 
-            # If we're not in ci_netif_stats nor sockets, keep scanning
+            if SOCKETS_OPEN_RE.match(line):
+                in_sockets_section = True
+                in_ci_section = False
+                cur_sock = None
+                continue
+
             if not in_ci_section and not in_sockets_section:
                 continue
 
-            # =========================
-            # Existing ci_netif_stats
-            # =========================
+            # ci_netif_stats
             if in_ci_section and current_stack and current_version and current_pid:
                 m4 = METRIC_RE.match(line)
                 if m4:
@@ -162,34 +141,20 @@ class OnloadCollector:
                     ci_metrics_data.setdefault(metric_name, []).append((labels, val))
                 continue
 
-            # =========================
-            # New sockets parsing
-            # =========================
+            # sockets section
             if in_sockets_section and current_stack and current_version and current_pid:
-                # If we see a titled header for some other section, sockets end.
                 if SECTION_TITLE_RE.match(line) and not DASH_ONLY_RE.match(line):
-                    if cur_sock is not None:
-                        # finalize previous socket before leaving (no emission here; we emit after loop)
-                        cur_sock = None
+                    cur_sock = None
                     in_sockets_section = False
                     continue
 
-                # Socket boundary separator (--------)
                 if DASH_ONLY_RE.match(line):
-                    # Finish the previous socket (if any)
                     cur_sock = None
                     continue
 
-                # New socket header?
                 mh = SOCK_HDR_RE.match(line)
                 if mh:
-                    # 'TCP|UDP {stack}:{index} lcl=... rmt=... STATE'
                     proto, stack_num, sock_index, lcl, rmt, state = mh.groups()
-                    # Only record sockets of this stack (defensive match)
-                    if current_stack is None or stack_num != str(current_stack):
-                        # Still accept, but we keep the stack label as reported by the current dump header
-                        pass
-                    # Begin a new socket context
                     cur_sock = {
                         "proto": proto,
                         "sock_index": sock_index,
@@ -199,15 +164,12 @@ class OnloadCollector:
                     }
                     continue
 
-                # Metrics for current socket (key=value tokens, possibly prefixed by label:)
                 if cur_sock is not None:
                     for k, v_str in _iter_socket_kv(line):
-                        # Try to convert to integer; skip non-numeric values
                         ival = _to_int_or_none(v_str)
                         if ival is None:
                             continue
                         metric_name = f"onload_sockets_{k.lower()}"
-                        # labels keep same base + socket identifiers
                         labels = [
                             str(current_stack),
                             str(current_pid),
@@ -220,9 +182,8 @@ class OnloadCollector:
                             cur_sock.get("state", ""),
                         ]
                         sockets_metrics_data.setdefault(metric_name, []).append((labels, ival))
-                # continue loop
 
-        # Emit ci_netif_stats metrics (unchanged behavior)
+        # Emit ci_netif_stats metrics
         for metric_name, samples in ci_metrics_data.items():
             c = CounterMetricFamily(
                 metric_name,
@@ -233,8 +194,7 @@ class OnloadCollector:
                 c.add_metric(labels, val)
             yield c
 
-        # Emit sockets metrics as additional CounterMetricFamily series
-        # Label schema is fixed to distinguish sockets without changing base structure (still CounterMetricFamily).
+        # Emit sockets metrics
         sockets_label_names = [
             'stack_id', 'pid', 'onload_version', 'stack_name',
             'proto', 'sock_index', 'lcl', 'rmt', 'state'
@@ -248,6 +208,7 @@ class OnloadCollector:
             for labels, val in samples:
                 c.add_metric(labels, val)
             yield c
+
 
 if __name__ == '__main__':
     parser = argparse.ArgumentParser(description='Onload ci_netif_stats + sockets exporter')
