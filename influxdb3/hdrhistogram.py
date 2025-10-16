@@ -1,117 +1,159 @@
-# ~/.plugins/hdr_latency.py
-# Scheduled Processing Engine plugin:
-#   - Queries the last 5 minutes of latency samples
-#   - Builds an HDRHistogram
-#   - Writes: p50,p90,p95,p99,p999,min,max,count (+ unit tag/field)
+# Python 3.8+
+# InfluxDB 3 Processing Engine: downsample streaming2(latency ns) → latency_5m
+# - Groups by tags: component, session
+# - Window: last 5 minutes
+# - Fields written: p50, p90, p95, p99, p99_9, min, max, count, unit="ns", histo_b64 (serialized HDR)
 #
-# Args (via trigger --trigger-arguments):
-#   source_measurement   e.g. "latency"
-#   value_field          e.g. "latency_us"
-#   target_measurement   e.g. "latency_summary"
-#   unit                 "us"|"ms"|"ns" (for metadata only)
-#   lowest               histogram lower bound (raw units)
-#   highest              histogram upper bound (raw units)
-#   sigfigs              histogram significant figures
-#   extra_tags           CSV "k=v,k2=v2"
-#   filter_tag           optional tag name to filter on
-#   filter_values        optional values list like "api@gateway"
+# Required dependency in engine venv: hdrhistogram (or hdrh)
+#   influxdb3 install package hdrhistogram
+#
+# Notes:
+# - Uses significant_figures=4 for higher precision
+# - Uses encode()/decode() if available; raises a clear error if missing
 
-from typing import Dict, Any, List
-from hdrhistogram import HdrHistogram
+from typing import Dict, Any, List, Tuple, DefaultDict
+from collections import defaultdict
 from time import time_ns
+import base64
 
-def _now_ns() -> int:
-    return time_ns()
-
-def _to_number(v):
+# Try common HDRHistogram bindings
+_hdr_cls = None
+_err = None
+try:
+    from hdrhistogram import HdrHistogram as _Hdr  # PyPI: hdrhistogram
+    _hdr_cls = _Hdr
+except Exception as e1:
+    _err = e1
     try:
-        return float(v)
-    except Exception:
-        return None
+        from hdrh.histogram import HdrHistogram as _Hdr  # PyPI: hdrh
+        _hdr_cls = _Hdr
+    except Exception as e2:
+        _err = (e1, e2)
+
+SIGFIGS = 4
+LOWEST = 1
+HIGHEST = 1_000_000_000  # 1 second in ns; adjust if you need wider range
+UNIT = "ns"
+
+PCTS = (50.0, 90.0, 95.0, 99.0, 99.9)
+
+def _require_hdr():
+    if _hdr_cls is None:
+        raise RuntimeError(
+            "HDRHistogram module not found. Install into Processing Engine venv:\n"
+            "  influxdb3 install package hdrhistogram\n"
+            f"Import errors: {_err}"
+        )
+
+def _new_hist():
+    return _hdr_cls(LOWEST, HIGHEST, SIGFIGS)
+
+def _encode_hist(h) -> str:
+    # Prefer native compressed encoding if available
+    if hasattr(h, "encode"):
+        b = h.encode()
+        return base64.b64encode(b).decode("ascii")
+    # Some bindings expose to_byte_array()
+    if hasattr(h, "to_byte_array"):
+        b = h.to_byte_array()
+        return base64.b64encode(b).decode("ascii")
+    raise RuntimeError("HDRHistogram binding lacks encode(); cannot serialize histogram.")
 
 def process_scheduled_call(influxdb3_local, call_time: str, args: Dict[str, Any]):
-    # --- Config ---
-    src = args.get("source_measurement", "latency")
-    fld = args.get("value_field", "latency_us")
-    dst = args.get("target_measurement", "latency_summary")
-    unit = args.get("unit", "us")                 # informational
-    lowest = int(args.get("lowest", "1"))         # histogram bounds in *raw* units
-    highest = int(args.get("highest", "10000000"))
-    sigfigs = int(args.get("sigfigs", "3"))
-    filt_tag = args.get("filter_tag")
-    filt_vals = args.get("filter_values")         # "a@b@c"
-    extra_tags = args.get("extra_tags", "")       # "k1=v1,k2=v2"
+    """
+    Scheduled trigger: every 5 minutes
+    Arguments (optional):
+      lowest, highest, sigfigs    -> override bounds/precision if needed
+      extra_tags                  -> CSV "k=v,k2=v2" applied to all outputs
+    """
+    _require_hdr()
 
-    # --- Build WHERE for last 5 minutes (+ optional tag filter) ---
+    lowest  = int(args.get("lowest", str(LOWEST)))
+    highest = int(args.get("highest", str(HIGHEST)))
+    sigfigs = int(args.get("sigfigs", str(SIGFIGS)))
+    extra   = args.get("extra_tags", "")
+
+    # Query only needed columns
     where = "time >= now() - INTERVAL '5 minutes' AND time < now()"
-    if filt_tag and filt_vals:
-        vals = [v for v in filt_vals.split("@") if v]
-        if vals:
-            quoted = ",".join([f"'{v}'" for v in vals])
-            where += f" AND {filt_tag} IN ({quoted})"
+    q = f"""
+      SELECT time, component, session, latency
+      FROM streaming2
+      WHERE {where}
+    """
+    rows = influxdb3_local.query(q, {})
 
-    q = f"SELECT time, {fld} FROM {src} WHERE {where}"
-    rows: List[Dict[str, Any]] = influxdb3_local.query(q, {})
+    if not rows:
+        influxdb3_local.info("hdr_downsample_5m: no rows in window")
+        return
 
-    samples: List[float] = []
+    # Partition by (component, session)
+    buckets: DefaultDict[Tuple[str, str], List[int]] = defaultdict(list)
+
     for r in rows:
-        v = _to_number(r.get(fld))
-        if v is not None and v >= 0:
-            samples.append(v)
-
-    if not samples:
-        influxdb3_local.info("hdr_latency: no data in window")
-        return
-
-    # --- HDRHistogram (integers expected) ---
-    hist = HdrHistogram(lowest_nonzero_value=lowest,
-                        highest_trackable_value=highest,
-                        significant_figures=sigfigs)
-    for v in samples:
+        comp = "" if r.get("component") is None else str(r["component"])
+        sess = "" if r.get("session") is None else str(r["session"])
+        v = r.get("latency")
+        if v is None:
+            continue
         try:
-            hist.record_value(int(v))
+            x = int(v)
         except Exception:
-            # skip out-of-range or invalid
-            pass
+            continue
+        if x < 0:
+            continue
+        buckets[(comp, sess)].append(x)
 
-    if hist.total_count == 0:
-        influxdb3_local.info("hdr_latency: no valid samples")
+    if not buckets:
+        influxdb3_local.info("hdr_downsample_5m: no valid samples after filtering")
         return
 
-    # --- Stats (percentiles + min/max + count) ---
-    p50  = hist.get_value_at_percentile(50.0)
-    p90  = hist.get_value_at_percentile(90.0)
-    p95  = hist.get_value_at_percentile(95.0)
-    p99  = hist.get_value_at_percentile(99.0)
-    p999 = hist.get_value_at_percentile(99.9)
-    vmin = hist.get_min_value()
-    vmax = hist.get_max_value()
-    cnt  = int(hist.total_count)
-
-    # --- Emit point at "now" (window end) ---
-    lb = LineBuilder(dst)
-
-    # optional tags
-    if extra_tags:
-        for kv in extra_tags.split(","):
+    # Pre-parse extra tags
+    extra_tag_pairs = []
+    if extra:
+        for kv in extra.split(","):
             kv = kv.strip()
-            if not kv or "=" not in kv:
-                continue
-            k, v = kv.split("=", 1)
-            lb.tag(k.strip(), v.strip())
+            if kv and "=" in kv:
+                k, v = kv.split("=", 1)
+                extra_tag_pairs.append((k.strip(), v.strip()))
 
-    # fields
-    lb.float64_field("p50",  p50)
-    lb.float64_field("p90",  p90)
-    lb.float64_field("p95",  p95)
-    lb.float64_field("p99",  p99)
-    lb.float64_field("p999", p999)
-    lb.float64_field("min",  vmin)
-    lb.float64_field("max",  vmax)
-    lb.uint64_field("count", cnt)
-    lb.string_field("unit", unit)
+    wrote = 0
+    for (comp, sess), samples in buckets.items():
+        if not samples:
+            continue
 
-    lb.time_ns(_now_ns())
+        h = _hdr_cls(lowest, highest, sigfigs)
+        for x in samples:
+            try:
+                h.record_value(x)
+            except Exception:
+                # out-of-range or invalid
+                pass
 
-    influxdb3_local.write(lb)
-    influxdb3_local.info("hdr_latency: wrote summary", {"count": cnt, "p99": p99, "dst": dst})
+        if h.total_count == 0:
+            continue
+
+        lb = LineBuilder("latency_5m")
+        lb.tag("component", comp)
+        lb.tag("session",   sess)
+        for k, v in extra_tag_pairs:
+            lb.tag(k, v)
+
+        # convenience percentiles
+        for p in PCTS:
+            fname = "p" + str(p).replace(".", "_")
+            lb.float64_field(fname, h.get_value_at_percentile(p))
+
+        lb.float64_field("min",  h.get_min_value())
+        lb.float64_field("max",  h.get_max_value())
+        lb.uint64_field("count", int(h.total_count))
+        lb.string_field("unit",  UNIT)
+
+        # serialized histogram for future merging
+        lb.string_field("histo_b64", _encode_hist(h))
+
+        # timestamp at window end
+        lb.time_ns(time_ns())
+        influxdb3_local.write(lb)
+        wrote += 1
+
+    influxdb3_local.info("hdr_downsample_5m: wrote buckets", {"count": wrote})
