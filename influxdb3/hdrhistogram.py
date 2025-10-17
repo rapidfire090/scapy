@@ -17,6 +17,7 @@ from typing import Dict, Any, List, Tuple, DefaultDict
 from collections import defaultdict
 from time import time_ns
 import base64
+from datetime import datetime, timezone, timedelta
 
 # ---------- HDR binding detection ----------
 _hdr_cls = None
@@ -85,12 +86,19 @@ def process_scheduled_call(influxdb3_local, call_time: str, args):
 
     extra = args.get("extra_tags", "") or ""
 
+    end  = datetime.now(timezone.utc)
+    start = end - timedelta(minutes=5)
+    start_iso = start.strftime("%Y-%m-%dT%H:%M:%SZ")
+    end_iso   = end.strftime("%Y-%m-%dT%H:%M:%SZ")
+    
+
     # Query only needed columns for last 5 minutes
-    where = "time >= now() - INTERVAL '5 minutes' AND time < now()"
     q = f"""
-      SELECT time, component, session, latency
-      FROM streaming2
-      WHERE {where}
+    SELECT "time","component","session","latency"
+    FROM streaming2
+    WHERE "time" >= TIMESTAMP '{start_iso}'
+      AND "time"  <  TIMESTAMP '{end_iso}'
+    ORDER BY "time" ASC
     """
     rows = influxdb3_local.query(q, {}) or []
 
