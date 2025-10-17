@@ -16,6 +16,7 @@ from collections import defaultdict
 from time import time_ns
 import base64
 
+
 # Try common HDRHistogram bindings
 _hdr_cls = None
 _err = None
@@ -36,6 +37,13 @@ HIGHEST = 1_000_000_000  # 1 second in ns; adjust if you need wider range
 UNIT = "ns"
 
 PCTS = (50.0, 90.0, 95.0, 99.0, 99.9)
+
+# add near the imports
+def _args_or_empty(a):
+    return a if isinstance(a, dict) else {}
+
+
+
 
 def _require_hdr():
     if _hdr_cls is None:
@@ -81,6 +89,8 @@ def process_scheduled_call(influxdb3_local, call_time: str, args: Dict[str, Any]
       WHERE {where}
     """
     rows = influxdb3_local.query(q, {})
+    rows = rows or []
+
 
     if not rows:
         influxdb3_local.info("hdr_downsample_5m: no rows in window")
