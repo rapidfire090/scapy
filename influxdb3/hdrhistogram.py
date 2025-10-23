@@ -1,82 +1,81 @@
 # ~/.plugins/hdr_downsample_5m.py
 # Python 3.8+
-# InfluxDB 3 Processing Engine: downsample streaming2(latency ns) → latency_5m
-# - Groups by tags: component, session
-# - Window: last 5 minutes
-# - Fields written: p50, p90, p95, p99, p99_9, min, max, count, unit="ns", histo_b64 (serialized HDR)
-#
-# Required dep (install into engine venv):
-#   influxdb3 install package hdrhistogram
-#
-# Notes:
-# - Uses significant_figures=4 (higher precision)
-# - Tolerates args=None from the scheduler
-# - Tries both common HDRHistogram bindings (hdrhistogram, hdrh)
+# Downsample streaming2(latency ns) → latency_5m
+# Buckets align on :00/:05/:10/... (every 5 min) and run with a +2m ingest delay.
 
 from typing import Dict, Any, List, Tuple, DefaultDict
 from collections import defaultdict
 from time import time_ns
-import base64
 from datetime import datetime, timezone, timedelta
+import base64
 
-# ---------- HDR binding detection ----------
+# ---- HDR binding detection ----
 _hdr_cls = None
 _err = None
 try:
-    from hdrhistogram import HdrHistogram as _Hdr  # PyPI: hdrhistogram
+    from hdrhistogram import HdrHistogram as _Hdr
     _hdr_cls = _Hdr
 except Exception as e1:
     _err = e1
     try:
-        from hdrh.histogram import HdrHistogram as _Hdr  # PyPI: hdrh
+        from hdrh.histogram import HdrHistogram as _Hdr
         _hdr_cls = _Hdr
     except Exception as e2:
         _err = (e1, e2)
 
-# ---------- Defaults (you can override via trigger-arguments) ----------
-SIGFIGS_DEFAULT = 4
+# ---- Defaults (overridable via trigger-arguments) ----
+SIGFIGS_DEFAULT = 3
 LOWEST_DEFAULT = 1
-HIGHEST_DEFAULT = 1_000_000_000  # 1 second in nanoseconds
+HIGHEST_DEFAULT = 30_000_000_000  # 30s in ns
 UNIT = "ns"
 PCTS = (50.0, 90.0, 95.0, 99.0, 99.9)
+INGEST_DELAY_MIN_DEFAULT = 2      # evaluate window end as (now - delay)
 
-# ---------- Helpers ----------
+# ---- Helpers ----
 def _args_or_empty(a):
     return a if isinstance(a, dict) else {}
 
 def _require_hdr():
     if _hdr_cls is None:
         raise RuntimeError(
-            "HDRHistogram module not found. Install into Processing Engine venv:\n"
+            "HDRHistogram not found. Install in engine venv:\n"
             "  influxdb3 install package hdrhistogram\n"
             f"Import errors: {_err}"
         )
 
 def _encode_hist(h) -> str:
-    # Prefer native compressed encoding if available
     if hasattr(h, "encode"):
         b = h.encode()
         return base64.b64encode(b).decode("ascii")
     if hasattr(h, "to_byte_array"):
         b = h.to_byte_array()
         return base64.b64encode(b).decode("ascii")
-    raise RuntimeError("HDRHistogram binding lacks encode(); cannot serialize histogram.")
+    raise RuntimeError("HDR binding lacks encode(); cannot serialize histogram.")
 
-# ---------- Entry point (scheduled) ----------
+def _iso_utc(dt: datetime) -> str:
+    return dt.astimezone(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+def _align_to_5m_boundary(dt: datetime) -> datetime:
+    """Floor dt to the latest :00/:05/:10/... boundary."""
+    # Remove seconds/micros, then subtract minute remainder mod 5
+    dt = dt.replace(second=0, microsecond=0)
+    rem = dt.minute % 5
+    return dt - timedelta(minutes=rem)
+
+# ---- Entry point ----
 def process_scheduled_call(influxdb3_local, call_time: str, args):
     """
-    Scheduled trigger: every 5 minutes
-
-    Optional trigger-arguments (CSV k=v list):
-      lowest       -> override histogram lowest trackable value (default 1)
-      highest      -> override histogram highest trackable value (default 1_000_000_000)
-      sigfigs      -> override significant figures (default 4)
-      extra_tags   -> CSV "k=v,k2=v2" added to every output point
+    Optional trigger-arguments (CSV k=v):
+      lowest=1
+      highest=30000000000
+      sigfigs=3
+      ingest_delay_min=2
+      extra_tags=k=v,k2=v2
     """
     _require_hdr()
     args = _args_or_empty(args)
 
-    # Histogram config (allow overrides)
+    # Config
     try:
         lowest  = int(args.get("lowest",  str(LOWEST_DEFAULT)))
         highest = int(args.get("highest", str(HIGHEST_DEFAULT)))
@@ -84,31 +83,43 @@ def process_scheduled_call(influxdb3_local, call_time: str, args):
     except Exception:
         lowest, highest, sigfigs = LOWEST_DEFAULT, HIGHEST_DEFAULT, SIGFIGS_DEFAULT
 
+    try:
+        ingest_delay_min = int(args.get("ingest_delay_min", str(INGEST_DELAY_MIN_DEFAULT)))
+        if ingest_delay_min < 0:
+            ingest_delay_min = INGEST_DELAY_MIN_DEFAULT
+    except Exception:
+        ingest_delay_min = INGEST_DELAY_MIN_DEFAULT
+
     extra = args.get("extra_tags", "") or ""
 
-    end  = datetime.now(timezone.utc)
-    start = end - timedelta(minutes=5)
-    start_iso = start.strftime("%Y-%m-%dT%H:%M:%SZ")
-    end_iso   = end.strftime("%Y-%m-%dT%H:%M:%SZ")
-    
+    # --- Compute aligned window ---
+    # 1) shift now by ingest delay
+    now_utc = datetime.now(timezone.utc)
+    shifted = now_utc - timedelta(minutes=ingest_delay_min)
+    # 2) floor to :00/:05/:10/... boundary
+    end_dt = _align_to_5m_boundary(shifted)
+    # 3) 5-minute window ending at that boundary
+    start_dt = end_dt - timedelta(minutes=5)
 
-    # Query only needed columns for last 5 minutes
+    start_iso = _iso_utc(start_dt)
+    end_iso   = _iso_utc(end_dt)
+
+    # Build query (explicit TIMESTAMP literals and quoted identifiers)
     q = f"""
-    SELECT "time","component","session","latency"
-    FROM streaming2
-    WHERE "time" >= TIMESTAMP '{start_iso}'
-      AND "time"  <  TIMESTAMP '{end_iso}'
-    ORDER BY "time" ASC
+      SELECT "time","component","session","latency"
+      FROM streaming2
+      WHERE "time" >= TIMESTAMP '{start_iso}'
+        AND "time"  < TIMESTAMP '{end_iso}'
+      ORDER BY "time" ASC
     """
     rows = influxdb3_local.query(q, {}) or []
-
     if not rows:
-        influxdb3_local.info("hdr_downsample_5m: no rows in window")
+        influxdb3_local.info("hdr_downsample_5m: no rows in window",
+                             {"window": f"{start_iso}..{end_iso}", "delay_min": ingest_delay_min})
         return
 
-    # Partition by (component, session)
+    # Group by (component, session)
     buckets: DefaultDict[Tuple[str, str], List[int]] = defaultdict(list)
-
     for r in rows:
         comp = "" if r.get("component") is None else str(r["component"])
         sess = "" if r.get("session")   is None else str(r["session"])
@@ -124,7 +135,8 @@ def process_scheduled_call(influxdb3_local, call_time: str, args):
         buckets[(comp, sess)].append(x)
 
     if not buckets:
-        influxdb3_local.info("hdr_downsample_5m: no valid samples after filtering")
+        influxdb3_local.info("hdr_downsample_5m: no valid samples after filtering",
+                             {"window": f"{start_iso}..{end_iso}"})
         return
 
     # Parse extra tags once
@@ -146,7 +158,6 @@ def process_scheduled_call(influxdb3_local, call_time: str, args):
             try:
                 h.record_value(x)
             except Exception:
-                # value outside trackable range or invalid; skip
                 pass
 
         if getattr(h, "total_count", 0) == 0:
@@ -158,7 +169,7 @@ def process_scheduled_call(influxdb3_local, call_time: str, args):
         for k, v in extra_tag_pairs:
             lb.tag(k, v)
 
-        # convenience percentiles
+        # Percentiles
         for p in PCTS:
             fname = "p" + str(p).replace(".", "_")
             lb.float64_field(fname, h.get_value_at_percentile(p))
@@ -168,15 +179,18 @@ def process_scheduled_call(influxdb3_local, call_time: str, args):
         lb.uint64_field("count", int(h.total_count))
         lb.string_field("unit",  UNIT)
 
-        # serialized histogram for future merging
+        # Serialized HDR for future merging
         try:
             lb.string_field("histo_b64", _encode_hist(h))
         except Exception as e:
-            influxdb3_local.warn("hdr_downsample_5m: serialization failed; writing without histo_b64", {"error": str(e)})
+            influxdb3_local.warn("hdr_downsample_5m: serialization failed; writing without histo_b64",
+                                 {"error": str(e)})
 
-        # timestamp at window end
-        lb.time_ns(time_ns())
+        # Use the ALIGNED boundary (end_dt) as the point timestamp
+        lb.time_ns(int(end_dt.timestamp() * 1e9))
         influxdb3_local.write(lb)
         wrote += 1
 
-    influxdb3_local.info("hdr_downsample_5m: wrote buckets", {"count": wrote})
+    influxdb3_local.info("hdr_downsample_5m: wrote buckets",
+                         {"count": wrote, "window": f"{start_iso}..{end_iso}",
+                          "delay_min": ingest_delay_min, "sigfigs": sigfigs, "highest_ns": highest})
