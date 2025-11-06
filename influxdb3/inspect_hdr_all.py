@@ -24,11 +24,13 @@ def dump_histo_b64(b64_str):
     print("\n=== Recorded Values ===")
     print(f"{'ValueFrom':>12} {'ValueTo':>12} {'Count':>10} {'% of Total':>12}")
     total = h.get_total_count()
-    for v in h.get_recorded_values():
-        pct = (v.count_at_value / total) * 100 if total > 0 else 0
-        print(f"{v.value_from:12} {v.value_to:12} {v.count_at_value:10} {pct:11.4f}%")
+    for v in h.get_recorded_iterator():
+        pct = (v.count_added_in_this_iteration_step / total) * 100 if total > 0 else 0
+        print(f"{v.value_iterated_from:12} {v.value_iterated_to:12} "
+              f"{v.count_added_in_this_iteration_step:10} {pct:11.4f}%")
 
     print("\n=== Raw Bucket Dump Complete ===")
+
 
 # Example usage:
 # dump_histo_b64("<paste your b64-encoded HDR histogram here>")
