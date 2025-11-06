@@ -21,15 +21,18 @@ def dump_histo_b64(b64_str):
         if p % 1 == 0:
             print(f"p{p:>3}: {h.get_value_at_percentile(p)}")
 
-    print("\n=== Recorded Values ===")
-    print(f"{'ValueFrom':>12} {'ValueTo':>12} {'Count':>10} {'% of Total':>12}")
-    total = h.get_total_count()
+    print("\n=== Recorded Buckets ===")
+    print(f"{'Low':>12} {'High':>12} {'Count':>12} {'% of Total':>12}")
+    total = h.total_count
     for v in h.get_recorded_iterator():
-        pct = (v.count_added_in_this_iteration_step / total) * 100 if total > 0 else 0
-        print(f"{v.value_iterated_from:12} {v.value_iterated_to:12} "
-              f"{v.count_added_in_this_iteration_step:10} {pct:11.4f}%")
+        low = v.value_iterated_from
+        high = v.value_iterated_to
+        count = v.count_at_value_iterated_to
+        pct = (count / total * 100) if total else 0
+        print(f"{low:12} {high:12} {count:12} {pct:11.4f}%")
 
-    print("\n=== Raw Bucket Dump Complete ===")
+    print("\n=== End of Histogram Dump ===")
+
 
 
 # Example usage:
