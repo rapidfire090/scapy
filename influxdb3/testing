@@ -1,0 +1,9 @@
+curl -s -X POST \
+  -H "Authorization: Bearer $INFLUX_TOKEN" \
+  -H "Content-Type: application/json" \
+  http://<host>:8181/api/v3/engine/hdr_merge \
+  -d '{
+        "start": "2025-11-10T09:15:00Z",
+        "end":   "2025-11-10T09:30:00Z",
+        "percentiles": "50@90@95@99@99.9"
+      }' | jq
