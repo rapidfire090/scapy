@@ -17,6 +17,7 @@
 
 from typing import Dict, Any, List, Tuple, DefaultDict
 from collections import defaultdict
+import json
 import base64
 
 # Try common HDR bindings
@@ -97,19 +98,43 @@ def _ok(influxdb3_local):
         return {"status":"degraded","error":str(e)}
 
 
-def process_http_call(influxdb3_local, request):
-    _require_hdr()
 
-    # Health probe: GET with no body
-    if getattr(request, "method", "POST").upper() == "GET":
-        return _ok(influxdb3_local)
+def process_request(influxdb3_local, query_parameters, request_headers, request_body, args=None):
+    """
+    query_parameters: dict of URL query params (e.g., ?start=...&end=...)
+    request_headers:  dict of HTTP headers
+    request_body:     bytes or str (POST body). Could be empty for GET.
+    args:             trigger-arguments dict (or None)
+    """
+    # normalize args
+    args = args if isinstance(args, dict) else {}
 
+    # parse body if present
+    body = {}
+    if request_body:
+        if isinstance(request_body, (bytes, bytearray)):
+            try:
+                body = json.loads(request_body.decode("utf-8"))
+            except Exception:
+                body = {}
+        elif isinstance(request_body, str):
+            try:
+                body = json.loads(request_body)
+            except Exception:
+                body = {}
 
-    body = request.json()
-    start = body.get("start")
-    end   = body.get("end")
+    # allow query string to override or supply fields
+    # (e.g., /api/v3/engine/hdr_merge?start=...&end=...)
+    start = body.get("start") or query_parameters.get("start")
+    end   = body.get("end")   or query_parameters.get("end")
+
+    # quick health check if no range provided
     if not start or not end:
-        return {"error": "start and end are required RFC3339 timestamps"}
+        try:
+            _ = influxdb3_local.query("SELECT 1", {}) or []
+            return {"status": "ok", "engine_sql": "ok"}
+        except Exception as e:
+            return {"status": "degraded", "error": str(e)}
 
     pct_list = _parse_pcts(body.get("percentiles", ""))
     group_by_str = body.get("group_by", "") or ""
