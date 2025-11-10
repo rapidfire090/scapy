@@ -88,8 +88,22 @@ def _parse_pcts(spec: str) -> List[float]:
             pass
     return out or DEFAULT_PCTS
 
+def _ok(influxdb3_local):
+    # tiny query to prove SQL path is working
+    try:
+        _ = influxdb3_local.query('SELECT 1', {}) or []
+        return {"status":"ok","engine_sql":"ok"}
+    except Exception as e:
+        return {"status":"degraded","error":str(e)}
+
+
 def process_http_call(influxdb3_local, request):
     _require_hdr()
+
+    # Health probe: GET with no body
+    if getattr(request, "method", "POST").upper() == "GET":
+        return _ok(influxdb3_local)
+
 
     body = request.json()
     start = body.get("start")
